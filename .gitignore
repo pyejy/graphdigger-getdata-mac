@@ -1,0 +1,5 @@
+# macOS
+.DS_Store
+
+# 本机的 Claude Code 权限设置,不属于项目内容
+.claude/settings.local.json

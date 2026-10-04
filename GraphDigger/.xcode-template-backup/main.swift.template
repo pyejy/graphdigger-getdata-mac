@@ -1,0 +1,3 @@
+// Placeholder entry — full AppKit UI lands in the next milestone.
+import GDCore
+print("GraphDigger core OK")

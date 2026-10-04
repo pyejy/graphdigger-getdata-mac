@@ -1,0 +1,1129 @@
+import AppKit
+import GDCore
+import UniformTypeIdentifiers
+
+/// The project file's type, as declared in the app bundle's `Info.plist`.
+///
+/// `UTType(exportedAs:)` rather than a literal every time a panel is built: the
+/// identifier is written in three places — here, the plist and the build script —
+/// and this is the one the compiler can check against `ProjectFile`.
+extension UTType {
+    static let graphDiggerProject = UTType(exportedAs: ProjectFile.typeIdentifier,
+                                           conformingTo: .data)
+}
+
+/// Window, menu bar, toolbar, sheets and dialogs.
+///
+/// The toolbar carries the everyday workflow; the menu bar keeps the same
+/// actions plus the ones used rarely. Everything that needs a window-level
+/// response (sheets, panels) routes through here so the canvas stays purely
+/// about drawing and hit-testing.
+final class AppDelegate: NSObject, NSApplicationDelegate {
+
+    private var window: NSWindow!
+    private var canvas: CanvasView!
+    private var toolbar: ToolbarView!
+    private var bitmap: InfoBarView!
+    private var sidebar: SidebarView!
+
+    /// The two Edit-menu entries, so `refreshUI` can name the action each would
+    /// take back — 「撤销 擦除」 rather than a bare 「撤销」, which leaves the user
+    /// guessing how far back it goes.
+    private var undoMenuItem: NSMenuItem!
+    private var redoMenuItem: NSMenuItem!
+
+    /// The project file this document was opened from, or last saved to.
+    ///
+    /// Nil after opening a bare image and before the first save: `⌘S` then has
+    /// nowhere to go, and the save panel is what turns the image into a project.
+    private var projectURL: URL?
+
+    /// Whether the user has already answered the save prompt with 「不保存」.
+    ///
+    /// Closing the window and quitting are two separate questions to AppKit —
+    /// with no windows left the app is asked to terminate, which runs the same
+    /// check a second time. Without this, choosing 「不保存」 would be followed
+    /// immediately by the same dialog.
+    private var discardConfirmed = false
+
+    /// An open-document event can arrive before `applicationDidFinishLaunching`
+    /// has built the window, so the URL is parked here and applied afterwards.
+    private var pendingDocumentURL: URL?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        buildMenu()
+        buildWindow()
+        if let url = pendingDocumentURL {
+            pendingDocumentURL = nil
+            openDocument(at: url)
+        }
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
+    /// The one place a quit is stopped. The window's own close goes through
+    /// `windowShouldClose`, which asks the same question before the window is
+    /// allowed to go; this covers `⌘Q`, where there is no window event at all.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        confirmClosingTheDocument() ? .terminateNow : .terminateCancel
+    }
+
+    /// Lets a project file or a chart image be opened by dropping it on the icon
+    /// or double-clicking it with GraphDigger as the handler — which is the whole
+    /// point of the project format: the recipient needs the app and nothing else.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        guard let url = urls.first else { return }
+        if window == nil {
+            pendingDocumentURL = url
+        } else {
+            openDocument(at: url)
+        }
+    }
+
+    /// Opens whatever was handed over, deciding by the file's own extension.
+    ///
+    /// By the file, not by which command was invoked: the open panel accepts both
+    /// kinds and a double-clicked file arrives with no command at all, so a
+    /// decision made per call site would be wrong for one of them.
+    private func openDocument(at url: URL) {
+        if url.pathExtension.lowercased() == ProjectFile.fileExtension {
+            openProject(at: url)
+        } else {
+            loadImage(at: url)
+        }
+    }
+
+    // MARK: - Window
+
+    private func buildWindow() {
+        let toolbarHeight = MainLayout.toolbarHeight
+
+        // Measured before the window exists so the minimum width is derived
+        // from the toolbar rather than hard-coded: the button row is a fixed
+        // width, and a narrower window would clip its right-hand buttons. The
+        // frame is deliberately far wider than the screen — it only has to be
+        // wide enough that the row lays itself out in full, and nothing is
+        // displayed from it.
+        toolbar = ToolbarView(frame: NSRect(x: 0, y: 0, width: 4_000,
+                                            height: toolbarHeight))
+        toolbar.delegate = self
+
+        // The window must be wide enough for the whole toolbar row *and* the
+        // data panel, or the panel would squeeze the canvas to nothing. Both
+        // minima matter — the canvas column has to stay usable and the button
+        // row has to fit inside it — so the window is their sum, not the larger
+        // of the two. See `MainLayout.windowMinimumWidth`.
+        //
+        // The row is laid out first, at a width that certainly fits the screen:
+        // it is what the minimum is measured from, and the arithmetic estimate
+        // cannot be trusted to agree with it. See `ToolbarView.requiredWidth`.
+        toolbar.layoutSubtreeIfNeeded()
+        let minWidth = MainLayout.windowMinimumWidth(toolbarWidth: toolbar.requiredWidth)
+        let contentRect = NSRect(x: 0, y: 0, width: minWidth + 60, height: 840)
+
+        window = NSWindow(contentRect: contentRect,
+                          styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                          backing: .buffered, defer: false)
+        window.title = "GraphDigger"
+        window.center()
+        window.minSize = NSSize(width: minWidth, height: 620)
+        // So closing the window asks about unsaved work *before* the window goes,
+        // rather than after — by which point cancelling would leave the app
+        // running with nothing to show.
+        window.delegate = self
+
+        // Auto Layout rather than autoresizing masks: the masks had the toolbar
+        // pinned by the *wrong* margin, so going fullscreen slid it into the
+        // middle and the canvas — added later, drawn on top — hid it entirely.
+        // Constraints express the intended geometry directly.
+        let container = NSView(frame: contentRect)
+        canvas = CanvasView(frame: .zero)
+        canvas.delegate = self
+
+        bitmap = InfoBarView(frame: .zero)
+        bitmap.delegate = self
+
+        let sidebar = SidebarView(frame: .zero)
+        sidebar.delegate = self
+        self.sidebar = sidebar
+
+        MainLayout.install(container: container, toolbar: toolbar, canvas: canvas,
+                           sidebar: sidebar, infoBar: bitmap,
+                           toolbarHeight: toolbarHeight)
+
+        window.contentView = container
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        refreshUI()
+    }
+
+    // MARK: - Menu
+
+    /// Not private: the selftest builds the real menu to check its shortcuts.
+    ///
+    /// A collision between two items' key equivalents is completely silent —
+    /// AppKit fires whichever comes first and never mentions the other — and the
+    /// only way to see it is to look at the finished menu. One pair was already
+    /// here (⌘R on both 清除标定并重来 and 重新选点) before anything checked.
+    func buildMenu() {
+        let main = NSMenu()
+
+        let appItem = NSMenuItem()
+        main.addItem(appItem)
+        let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "About GraphDigger",
+                        action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
+                        keyEquivalent: "")
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Quit GraphDigger",
+                        action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appItem.submenu = appMenu
+
+        // ---- Edit -------------------------------------------------------
+        // There was no Edit menu until undo arrived, and an undo with no ⌘Z is an
+        // undo nobody finds. It sits where every other Mac app puts it, between
+        // the application menu and File.
+        let editItem = NSMenuItem()
+        main.addItem(editItem)
+        let editMenu = NSMenu(title: "Edit")
+        undoMenuItem = NSMenuItem(title: "撤销", action: #selector(undoAction(_:)),
+                                  keyEquivalent: "z")
+        editMenu.addItem(undoMenuItem)
+        redoMenuItem = NSMenuItem(title: "重做", action: #selector(redoAction(_:)),
+                                  keyEquivalent: "z")
+        redoMenuItem.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(redoMenuItem)
+        editItem.submenu = editMenu
+
+        // ---- File -------------------------------------------------------
+        let fileItem = NSMenuItem()
+        main.addItem(fileItem)
+        let fileMenu = NSMenu(title: "File")
+        // One 「打开…」 for both kinds of file. Two entries would make the user
+        // work out which sort of document they are holding before they can ask
+        // for it, when the file itself already says — and ⌘O keeps meaning what
+        // it always meant for the images this app used to open.
+        fileMenu.addItem(withTitle: "打开…", action: #selector(openDocument(_:)), keyEquivalent: "o")
+        fileMenu.addItem(.separator())
+        fileMenu.addItem(withTitle: "保存项目", action: #selector(saveProject(_:)), keyEquivalent: "s")
+        let saveAsItem = NSMenuItem(title: "项目另存为…", action: #selector(saveProjectAs(_:)),
+                                    keyEquivalent: "s")
+        saveAsItem.keyEquivalentModifierMask = [.command, .shift]
+        fileMenu.addItem(saveAsItem)
+        fileMenu.addItem(.separator())
+
+        let exportItem = NSMenuItem(title: "Export Data", action: nil, keyEquivalent: "")
+        let exportMenu = NSMenu(title: "Export Data")
+        for format in ExportFormat.allCases {
+            let item = NSMenuItem(title: format.displayName,
+                                  action: #selector(exportData(_:)), keyEquivalent: "")
+            item.representedObject = format.rawValue
+            exportMenu.addItem(item)
+        }
+        exportItem.submenu = exportMenu
+        fileMenu.addItem(exportItem)
+
+        fileMenu.addItem(withTitle: "Copy Data to Clipboard",
+                         action: #selector(copyData(_:)), keyEquivalent: "c")
+        fileMenu.addItem(.separator())
+        fileMenu.addItem(withTitle: "Close Window",
+                         action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        fileItem.submenu = fileMenu
+
+        // ---- Operations --------------------------------------------------
+        let opsItem = NSMenuItem()
+        main.addItem(opsItem)
+        let opsMenu = NSMenu(title: "Operations")
+
+        func addTool(_ title: String, _ raw: String, _ key: String,
+                     _ modifiers: NSEvent.ModifierFlags = [.command]) {
+            let item = NSMenuItem(title: title, action: #selector(selectTool(_:)), keyEquivalent: key)
+            item.representedObject = raw
+            item.keyEquivalentModifierMask = modifiers
+            opsMenu.addItem(item)
+        }
+
+        addTool("Browse (浏览)", "browse", "0")
+        opsMenu.addItem(.separator())
+        // The plain letter goes to the everyday action; the rarer or more
+        // destructive one keeps its letter a modifier over. That is the rule
+        // behind both of these, and it is the rule the File menu follows too.
+        //
+        // ⌥⌘S, not ⌘S. 标定 held ⌘S from the beginning, when the app had no
+        // documents to save; now that it does, ⌘S has to mean 保存 — it is what
+        // every Mac user's hand does without asking, and the mistake it would
+        // otherwise cause is a bad one. If the coordinate system is already set,
+        // a stray ⌘S meant for 保存 would offer to throw it away; if it is not,
+        // the next four clicks on the chart would silently be eaten as
+        // calibration anchors.
+        addTool("Set the Scale (标定坐标系)", "setScale", "s", [.command, .option])
+        addTool("Edit Calibration Values (修改标定数值)…", "editCalibration", "")
+        // ⌥⌘R for the same reason, and it repairs a collision that was already
+        // here: 清除标定并重来 and 重新选点 were both written with ⌘R. AppKit
+        // silently fires whichever comes first and never mentions the loser, so
+        // 重新选点 has been unreachable from the keyboard all along — and it is
+        // the one of the two that is a *tool*, sitting in the toolbar beside
+        // 橡皮擦. It takes the plain key; the destructive one moves over.
+        addTool("Recalibrate (清除标定并重来)", "recalibrate", "r", [.command, .option])
+        opsMenu.addItem(.separator())
+        addTool("Pick Curve Color (取曲线颜色)", "pickLineColor", "l")
+        addTool("Pick Background Color (取背景颜色)", "pickBackgroundColor", "k")
+        addTool("Color Tolerance…", "tolerance", "")
+        opsMenu.addItem(.separator())
+        addTool("Digitize Area (区域取点)", "gridDigitize", "d")
+        addTool("Auto Trace Line (自动跟踪)", "traceDigitize", "t")
+        addTool("Point Capture (手工取点)", "capture", "p")
+        addTool("Eraser (橡皮擦)", "eraser", "e")
+        addTool("Re-digitize (重新选点)", "redigitize", "r")
+        opsMenu.addItem(.separator())
+        opsMenu.addItem(withTitle: "Add Curve (新增曲线)",
+                        action: #selector(addLine(_:)), keyEquivalent: "n")
+        opsMenu.addItem(withTitle: "Delete Current Curve (删除当前曲线)",
+                        action: #selector(deleteLine(_:)), keyEquivalent: "")
+        opsMenu.addItem(withTitle: "Clear Points on Current Curve",
+                        action: #selector(clearPoints(_:)), keyEquivalent: "")
+        opsMenu.addItem(.separator())
+        let orderItem = NSMenuItem(title: "Point Order (取点顺序)", action: nil, keyEquivalent: "")
+        let orderMenu = NSMenu(title: "Point Order")
+        for order in PointOrder.allCases {
+            let item = NSMenuItem(title: order.displayName,
+                                  action: #selector(setPointOrder(_:)), keyEquivalent: "")
+            item.representedObject = order.rawValue
+            orderMenu.addItem(item)
+        }
+        orderItem.submenu = orderMenu
+        opsMenu.addItem(orderItem)
+        opsMenu.addItem(.separator())
+        // 点重排 sits with the tools rather than among the order menu's entries:
+        // the four order modes are choices about the points, while this is a
+        // gesture that produces a fifth order nothing else can name.
+        addTool("Reorder Points by Sweep (点重排)", "reorder", "b")
+        opsMenu.addItem(withTitle: "Clear Reorder (清除重排)",
+                        action: #selector(clearReorder(_:)), keyEquivalent: "")
+        opsMenu.addItem(.separator())
+        // The sampling spacings are set by the knob in the info bar, which is
+        // where the eye already goes when the tool is selected. The menu entries
+        // stay as a second, typed route — the menu bar is expected to list every
+        // command — but they open a field rather than being the only way in,
+        // which is what the user complained about: 网格间距 was reachable only
+        // from here and undiscoverable, and the trace density not at all.
+        opsMenu.addItem(withTitle: "网格间距 (Grid Spacing)…",
+                        action: #selector(setGridSpacing(_:)), keyEquivalent: "")
+        opsMenu.addItem(withTitle: "取点密度 (Trace Density)…",
+                        action: #selector(setTraceSpacing(_:)), keyEquivalent: "")
+        opsItem.submenu = opsMenu
+
+        // ---- View --------------------------------------------------------
+        let viewItem = NSMenuItem()
+        main.addItem(viewItem)
+        let viewMenu = NSMenu(title: "View")
+        viewMenu.addItem(withTitle: "Zoom In", action: #selector(zoomIn(_:)), keyEquivalent: "+")
+        viewMenu.addItem(withTitle: "Zoom Out", action: #selector(zoomOut(_:)), keyEquivalent: "-")
+        viewMenu.addItem(withTitle: "Fit to Window", action: #selector(zoomToFit(_:)), keyEquivalent: "9")
+        viewItem.submenu = viewMenu
+
+        NSApp.mainMenu = main
+    }
+
+    // MARK: - Files
+
+    @objc private func openDocument(_ sender: Any?) {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = [.graphDiggerProject, .image]
+        panel.message = "选择 GraphDigger 项目(.\(ProjectFile.fileExtension)),或一张图表图片"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        openDocument(at: url)
+    }
+
+    private func loadImage(at url: URL) {
+        guard let image = NSImage(contentsOf: url) else {
+            presentError("无法读取 \(url.lastPathComponent)。")
+            return
+        }
+        // The bytes are read as well as the image, and kept: a project save
+        // writes them back rather than re-encoding, because every digitised point
+        // is a coordinate into this exact image. Reading the file twice — once as
+        // data, once through ImageIO — is cheaper than the alternative of
+        // re-encoding the picture and hoping it round-trips.
+        //
+        // The result is checked rather than assumed: `NSImage` decodes lazily, so
+        // a truncated or half-copied file yields an object that only fails when
+        // something asks for its pixels.
+        guard canvas.load(image: image, data: try? Data(contentsOf: url),
+                          name: url.lastPathComponent) else {
+            presentError("\(url.lastPathComponent) 的像素读不出来 —— 文件可能已损坏或被截断。")
+            return
+        }
+        canvas.zoomToFit()
+        // An image on its own is not a project yet: ⌘S has to ask where to put
+        // one, and the baseline is "nothing has been done to this picture".
+        projectURL = nil
+        canvas.markSaved()
+        discardConfirmed = false
+        refreshUI("已载入 \(url.lastPathComponent) —— 标定坐标系后即可取点")
+    }
+
+    /// Opens a saved project: image, calibration and every curve, in one go.
+    private func openProject(at url: URL) {
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            presentError("读不到 \(url.lastPathComponent):\(error.localizedDescription)")
+            return
+        }
+
+        let document: ProjectDocument
+        do {
+            document = try ProjectDocument(serialized: data)
+        } catch {
+            // `ProjectFileError` says something the user can act on — truncated,
+            // a newer format, damaged — so it is surfaced as written rather than
+            // wrapped in a generic failure.
+            presentError((error as? ProjectFileError)?.localizedDescription
+                ?? "项目文件无法解析:\(error.localizedDescription)")
+            return
+        }
+
+        guard canvas.load(project: document) else {
+            presentError("项目文件里的图片无法解码 —— 文件可能已损坏。"
+                + "标定与曲线数据仍是完好的,但需要原始图片才能显示。")
+            return
+        }
+
+        projectURL = url
+        canvas.markSaved()
+        discardConfirmed = false
+        canvas.zoomToFit()
+        // A reopened project is not in the middle of anything: the tool goes back
+        // to 浏览 so the first click pans rather than drawing.
+        canvas.tool = .browse
+        refreshUI(projectSummary(prefix: "已打开 \(url.lastPathComponent)"))
+    }
+
+    /// What the status line says a project contains, spelled the same way whether
+    /// it has just been opened or just been written.
+    private func projectSummary(prefix: String) -> String {
+        let state = canvas.state
+        var parts = ["图片"]
+        if state.calibration != nil { parts.append("标定") }
+        parts.append("\(state.lines.count) 条曲线 \(state.totalPointCount) 点")
+        return "\(prefix)(\(parts.joined(separator: " + ")))"
+    }
+
+    @objc private func saveProject(_ sender: Any?) {
+        // No file yet — an image that has never been saved as a project, or a
+        // project opened from somewhere that has since moved — so ask where.
+        guard let url = projectURL else {
+            saveProjectAs(sender)
+            return
+        }
+        writeProject(to: url)
+    }
+
+    @objc private func saveProjectAs(_ sender: Any?) {
+        saveProjectChoosingLocation()
+    }
+
+    /// The save panel half of both save commands. Returns whether a file was
+    /// actually written, which is what the quit prompt needs: cancelling the
+    /// panel is a decision not to save, and therefore not to close.
+    @discardableResult
+    private func saveProjectChoosingLocation() -> Bool {
+        guard canvas.buffer != nil else {
+            presentError("还没有打开图片,没有可保存的项目。")
+            return false
+        }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.graphDiggerProject]
+        panel.nameFieldStringValue = suggestedProjectName()
+        panel.message = "图片、标定坐标系与曲线数据会一起写进这一个文件"
+        guard panel.runModal() == .OK, let url = panel.url else { return false }
+        return writeProject(to: url)
+    }
+
+    /// A project named after the chart, so the two are recognisable side by side
+    /// in the Finder. Falls back only when the image arrived with no name at all.
+    private func suggestedProjectName() -> String {
+        let stem = (canvas.imageName as NSString?)?.deletingPathExtension ?? ""
+        let base = stem.trimmingCharacters(in: .whitespaces).isEmpty ? "图表" : stem
+        return "\(base).\(ProjectFile.fileExtension)"
+    }
+
+    /// Writes the whole document, and reports whether it landed.
+    @discardableResult
+    private func writeProject(to url: URL) -> Bool {
+        guard let document = canvas.projectDocument(appVersion: appVersion) else {
+            presentError("还没有打开图片,没有可保存的项目。")
+            return false
+        }
+        do {
+            try document.serialized().write(to: url, options: .atomic)
+        } catch let error as ProjectFileError {
+            presentError(error.localizedDescription)
+            return false
+        } catch {
+            presentError("写入失败:\(error.localizedDescription)")
+            return false
+        }
+
+        projectURL = url
+        // The baseline moves to what was just written, which is also what clears
+        // the edited dot: the file and the screen are the same document again.
+        canvas.markSaved()
+        discardConfirmed = false
+        refreshUI(projectSummary(prefix: "已保存 \(url.lastPathComponent)"))
+        return true
+    }
+
+    /// The app's own version, recorded in the file so a misbehaving project can
+    /// be traced to the build that wrote it.
+    private var appVersion: String? {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
+    }
+
+    // MARK: - Closing
+
+    /// Asks before anything discards work that lives only in memory.
+    ///
+    /// Everything here does: the calibration, the curves, and the image itself,
+    /// which sits *inside* the project file rather than beside it — so an image
+    /// that was opened and calibrated but never saved has no second copy on disk.
+    private func confirmClosingTheDocument() -> Bool {
+        if discardConfirmed { return true }
+        guard hasUnsavedChanges else { return true }
+
+        let alert = NSAlert()
+        alert.messageText = "要保存对项目的修改吗?"
+        alert.informativeText = "项目里包含图片、标定坐标系和 \(canvas.state.totalPointCount) 个数据点,"
+            + "不保存就关掉会全部丢失。"
+        alert.addButton(withTitle: "保存")
+        alert.addButton(withTitle: "不保存")
+        alert.addButton(withTitle: "取消")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            // A cancelled save panel is not a yes: the file was never written, so
+            // closing now would discard the work the user just asked to keep.
+            return projectURL.map { writeProject(to: $0) } ?? saveProjectChoosingLocation()
+        case .alertSecondButtonReturn:
+            discardConfirmed = true
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Whether the document has edits a save would capture. The canvas owns the
+    /// comparison — it is what knows when the state changed, and holding a second
+    /// copy of the baseline out here would be the flag problem over again.
+    private var hasUnsavedChanges: Bool { canvas.hasUnsavedChanges }
+
+    /// Keeps the window's own document affordances in step: what the file is
+    /// called, where it lives, and whether the copy on disk is behind the screen.
+    ///
+    /// The dot in the close button is the platform's own "unsaved" signal — the
+    /// one a Mac user already looks for — so it is driven from here rather than
+    /// invented as a badge somewhere in the toolbar, which has no width to spare
+    /// and would be a second vocabulary for the same fact.
+    private func updateDocumentChrome() {
+        guard canvas.buffer != nil else {
+            window.title = "GraphDigger"
+            window.representedURL = nil
+            window.isDocumentEdited = false
+            return
+        }
+        // The project's name once it has one, the image's until then.
+        let name = projectURL?.lastPathComponent
+            ?? canvas.imageName
+            ?? "未命名项目"
+        window.title = "GraphDigger — \(name)"
+        window.representedURL = projectURL
+        window.isDocumentEdited = hasUnsavedChanges
+    }
+
+    @objc private func exportData(_ sender: Any?) {
+        // From the toolbar the format is chosen by a small menu; from the menu
+        // bar the item already carries one.
+        if let item = sender as? NSMenuItem, let raw = item.representedObject as? String,
+           let format = ExportFormat(rawValue: raw) {
+            performExport(format: format, relativeTo: nil)
+        } else {
+            presentFormatChooser()
+        }
+    }
+
+    private func presentFormatChooser() {
+        let alert = NSAlert()
+        alert.messageText = "导出为哪种格式?"
+        alert.informativeText = "CSV / TSV 最通用;DXF 给 CAD;EPS 是矢量图。"
+        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 300, height: 26))
+        popup.addItems(withTitles: ExportFormat.allCases.map(\.displayName))
+        alert.accessoryView = popup
+        alert.addButton(withTitle: "导出")
+        alert.addButton(withTitle: "取消")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let format = ExportFormat.allCases[max(0, popup.indexOfSelectedItem)]
+        performExport(format: format, relativeTo: nil)
+    }
+
+    private func performExport(format: ExportFormat, relativeTo sender: NSView?) {
+        let text: String
+        do {
+            text = try Exporter.text(for: canvas.state.lines,
+                                     calibration: canvas.state.calibration,
+                                     format: format)
+        } catch {
+            presentExportError(error)
+            return
+        }
+
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "digitized.\(format.fileExtension)"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try text.write(to: url, atomically: true, encoding: .utf8)
+            refreshUI("已导出到 \(url.lastPathComponent)")
+        } catch {
+            presentError("写入失败:\(error.localizedDescription)")
+        }
+    }
+
+    @objc private func copyData(_ sender: Any?) {
+        let text: String
+        do {
+            text = try Exporter.text(for: canvas.state.lines,
+                                     calibration: canvas.state.calibration,
+                                     format: .tsv)
+        } catch {
+            presentExportError(error)
+            return
+        }
+        let board = NSPasteboard.general
+        board.clearContents()
+        board.setString(text, forType: .string)
+        let count = canvas.state.lines.reduce(0) { $0 + $1.points.count }
+        refreshUI("已复制 \(count) 个数据点到剪贴板")
+    }
+
+    private func presentExportError(_ error: Error) {
+        switch error {
+        case ExportError.calibrationMissing:
+            presentError("还没有标定坐标系。请先点「标定坐标系」建立坐标系,数据才能换算成实际数值。")
+        case ExportError.noPoints:
+            presentError("当前没有已提取的数据点。先用「区域取点」或「自动跟踪」取点。")
+        default:
+            presentError("导出失败:\(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Undo
+
+    /// Takes back the last action, whichever tool took it.
+    ///
+    /// Both the toolbar button and ⌘Z land here, so there is one path to check
+    /// rather than two that can drift. The message names what went: a silent
+    /// success on a canvas whose change is off-screen — the point the eraser took
+    /// out ten seconds ago — is indistinguishable from a shortcut that did
+    /// nothing.
+    @objc private func undoAction(_ sender: Any?) {
+        guard let label = canvas.undo() else {
+            refreshUI("没有可撤销的操作了")
+            return
+        }
+        refreshUI("已撤销:\(label)")
+    }
+
+    /// Puts back the action 撤销 took away, and names it in the status line.
+    ///
+    /// The counterpart to `undoAction`, reached by the 恢复 segment and by ⇧⌘Z.
+    /// It exists because 撤销 over-reaches: one ⌘Z too many is the commonest way
+    /// to end up with the wrong picture, and without a way back the only repair
+    /// is to redo the work by hand.
+    @objc private func redoAction(_ sender: Any?) {
+        guard let label = canvas.redo() else {
+            refreshUI("没有可重做的操作")
+            return
+        }
+        refreshUI("已重做:\(label)")
+    }
+
+    // MARK: - Operations
+
+    @objc private func selectTool(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String else { return }
+        applyTool(raw)
+    }
+
+    private func applyTool(_ raw: String) {
+        switch raw {
+        case "recalibrate":         recalibrate()
+        case "tolerance":           setTolerance(nil)
+        case "setScale":            beginCalibration()
+        case "editCalibration":     editCalibrationValues()
+        case "pickLineColor":       canvas.tool = .pickLineColor
+        case "pickBackgroundColor": canvas.tool = .pickBackgroundColor
+        case "gridDigitize":        canvas.tool = .gridDigitize
+        case "traceDigitize":       canvas.tool = .traceDigitize
+        case "capture":             canvas.tool = .capture
+        case "eraser":              canvas.tool = .eraser
+        case "redigitize":          canvas.tool = .redigitize
+        case "reorder":             canvas.tool = .reorder
+        default:                    canvas.tool = .browse
+        }
+        refreshUI()
+    }
+
+    @objc private func addLine(_ sender: Any?) {
+        canvas.addLine()
+        refreshUI()
+    }
+
+    @objc private func deleteLine(_ sender: Any?) {
+        canvas.removeActiveLine()
+        refreshUI()
+    }
+
+    @objc private func clearPoints(_ sender: Any?) {
+        canvas.clearActiveLinePoints()
+        refreshUI()
+    }
+
+    @objc private func setPointOrder(_ sender: NSMenuItem) {
+        guard let id = canvas.state.activeLineID else {
+            presentError("请先在右侧面板选中一条曲线。")
+            return
+        }
+        guard let raw = sender.representedObject as? String,
+              let order = PointOrder(rawValue: raw) else { return }
+        canvas.setOrder(order, for: id)
+        refreshUI("取点顺序 = \(order.displayName)")
+    }
+
+    /// Throws away a sweep and puts the curve back in its extraction order.
+    ///
+    /// `⌘Z` also takes a sweep back, so this is not the *only* way out of one —
+    /// but it is the one that does not require the sweep to be the last thing
+    /// that happened, and it is why the sweep was stored beside the points rather
+    /// than replacing them.
+    @objc private func clearReorder(_ sender: Any?) {
+        guard let id = canvas.state.activeLineID else {
+            presentError("请先在右侧面板选中一条曲线。")
+            return
+        }
+        guard canvas.state.activeLine?.sweptOrder != nil else {
+            refreshUI("这条曲线还没有重排过")
+            return
+        }
+        canvas.clearReorder(for: id)
+        refreshUI("已清除重排 —— 曲线回到原来的取点顺序")
+    }
+
+    /// Enters calibration, refusing to throw away an existing one without a word.
+    ///
+    /// The canvas owns the policy (`beginCalibration(force:)`) so the refusal is
+    /// testable; all this adds is the question and the retry. Once a coordinate
+    /// system exists, re-calibrating means four more clicks and losing the old
+    /// mapping, which is not something to do because a button was clicked by
+    /// accident.
+    private func beginCalibration() {
+        if canvas.beginCalibration(force: false) {
+            refreshUI()
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "已经标定过了"
+        alert.informativeText = "重新标定会覆盖现有的坐标系,需要重新点取 4 个标记。"
+            + "已提取的数据点不会丢失(它们存的是像素位置)。确定要重来吗?"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "重新标定")
+        alert.addButton(withTitle: "取消")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        _ = canvas.beginCalibration(force: true)
+        refreshUI("已清除标定 —— 依次点取 X 轴起始、X 轴末端、Y 轴起始、Y 轴末端")
+    }
+
+    /// Edits the four calibration values without touching the clicked markers.
+    private func editCalibrationValues() {
+        guard let calibration = canvas.state.calibration,
+              let anchors = canvas.state.calibrationAnchors else {
+            presentError("还没有标定。请先点「标定坐标系」建立坐标系。")
+            return
+        }
+        CalibrationSheet.present(in: window, anchors: anchors,
+                                 previous: calibration, editing: true) { [weak self] map in
+            guard let self, let map else { return }
+            self.canvas.updateCalibrationValues(map)
+            self.refreshUI("标定数值已更新 —— 四个标记位置不变")
+        }
+    }
+
+    private func recalibrate() {
+        guard canvas.state.calibration != nil else {
+            canvas.tool = .setScale
+            refreshUI()
+            return
+        }
+        canvas.clearCalibration()
+        canvas.tool = .setScale
+        refreshUI("标定已清除。已提取的数据点保留不变,重新点取 3 个标记即可。")
+    }
+
+    /// The typed route to the two sampling spacings.
+    ///
+    /// Range and clamping come from `ToolParameter`, the same source the slider's
+    /// travel does, so the field can never offer a value the knob cannot be
+    /// dragged back to: two hand-written limits are how a control ends up showing
+    /// a number it cannot reproduce.
+    @objc private func setGridSpacing(_ sender: Any?) {
+        guard let value = promptForNumber(for: .gridSpacing,
+                                          title: "网格间距",
+                                          message: "区域取点/重新选点时相邻扫描线的间隔(像素)。数值越小点越密。",
+                                          current: Double(canvas.state.gridSpacing)) else { return }
+        canvas.setGridSpacing(Int(value.rounded()))
+        refreshUI("网格间距 = \(canvas.state.gridSpacing) px")
+    }
+
+    @objc private func setTraceSpacing(_ sender: Any?) {
+        guard let value = promptForNumber(for: .traceSpacing,
+                                          title: "取点密度",
+                                          message: "自动跟踪时沿曲线每隔多少像素保留一个点。数值越小点越密,1 表示每个像素都取。",
+                                          current: Double(canvas.state.traceSpacing)) else { return }
+        canvas.setTraceSpacing(Int(value.rounded()))
+        refreshUI("取点密度 = 每 \(canvas.state.traceSpacing) px 一点")
+    }
+
+    @objc private func setTolerance(_ sender: Any?) {
+        guard let value = promptForNumber(title: "颜色容差",
+                                          message: "判定「属于曲线」的颜色距离阈值。曲线没取全就调大,取进太多杂点就调小。",
+                                          current: canvas.activeColorTolerance,
+                                          minimum: 1, maximum: 442) else { return }
+        canvas.setColorTolerance(value)
+        refreshUI("颜色容差 = \(Int(canvas.activeColorTolerance))")
+    }
+
+    /// A number typed in, bounded by the travel of the control that also sets it.
+    private func promptForNumber(for parameter: ToolParameter, title: String,
+                                 message: String, current: Double) -> Double? {
+        let range = parameter.range
+        return promptForNumber(title: title, message: message, current: current,
+                               minimum: range.lowerBound, maximum: range.upperBound)
+    }
+
+    private func promptForNumber(title: String, message: String,
+                                 current: Double,
+                                 minimum: Double, maximum: Double) -> Double? {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 22))
+        field.stringValue = String(format: "%g", current)
+        alert.accessoryView = field
+        alert.addButton(withTitle: "确定")
+        alert.addButton(withTitle: "取消")
+        guard alert.runModal() == .alertFirstButtonReturn,
+              let value = Double(field.stringValue.trimmingCharacters(in: .whitespaces)),
+              value >= minimum, value <= maximum else { return nil }
+        return value
+    }
+
+    // MARK: - View
+
+    @objc private func zoomIn(_ sender: Any?) { canvas.zoomIn() }
+    @objc private func zoomOut(_ sender: Any?) { canvas.zoomOut() }
+    @objc private func zoomToFit(_ sender: Any?) {
+        let changed = canvas.zoomToFit()
+        refreshUI(changed ? "已适配窗口" : "已是适配状态")
+    }
+
+    // MARK: - UI refresh
+
+    /// Rebuilds the toolbar's step prompt, the status line and the data panel
+    /// from current state. Every mutation path funnels through here, so the
+    /// three views can never disagree about what the project currently contains.
+    private func refreshUI(_ extra: String? = nil) {
+        let hasImage = canvas.buffer != nil
+        let calibrated = canvas.state.calibration != nil
+        let lines = canvas.state.lines
+        let active = canvas.state.activeLine
+        let pointCount = canvas.state.totalPointCount
+
+        toolbar.setActiveTool(canvas.tool)
+
+        // The strip's right end shows the number the tool in hand works by — the
+        // ring's size, or the spacing its sampling uses — and nothing for the
+        // tools that have no such number. The control used to be the eraser's
+        // alone and to sit there permanently; the two spacings it now also serves
+        // were in the 操作 menu, one behind a modal dialog and one not adjustable
+        // at all.
+        let parameter = canvas.tool.parameter
+        bitmap.setParameter(parameter, value: parameter.map { canvas.value(of: $0) } ?? 0)
+
+        sidebar.update(lines: lines,
+                       calibration: canvas.state.calibration,
+                       activeID: canvas.state.activeLineID)
+
+        // The step prompt walks the user through the pipeline in order, which is
+        // what the menu bar could never convey. Readiness is judged per curve:
+        // on a multi-curve chart the second curve still needs its own colour.
+        let activeReady = active?.lineColor != nil
+        let step: String
+        if !hasImage {
+            step = "第 1 步:打开一张图表图片 (⌘O)"
+        } else if !calibrated {
+            step = canvas.scalePrompt ?? "第 2 步:点「标定坐标系」建立坐标系"
+        } else if !activeReady {
+            step = active == nil
+                ? "第 3 步:点「取曲线颜色」再点曲线 —— 会自动新建一条曲线"
+                : "第 3 步:给「\(active!.name)」取色 —— 点「取曲线颜色」后点这条曲线"
+        } else if pointCount == 0 {
+            step = "第 4 步:点「区域取点」框选曲线,或「自动跟踪」点曲线起点"
+        } else if active?.points.isEmpty == true {
+            step = "「\(active!.name)」还没有点 —— 继续取点,或在右侧面板「新增曲线」换一条"
+        } else {
+            step = "数据已就绪 —— 可继续取点,或点「复制」/「导出…」"
+        }
+
+        var status: [String] = []
+        if !calibrated { status.append("⚠️ 未标定") }
+        if hasImage {
+            if let active, active.lineColor == nil {
+                status.append("⚠️「\(active.name)」未取色")
+            }
+            status.append(canvas.zoomDescription)
+            if let background = canvas.state.defaultBackgroundColor {
+                status.append("背景 RGB(\(background.r),\(background.g),\(background.b))")
+            }
+        }
+        // Sweeping is the one tool whose progress is not visible from the curve
+        // alone: the polyline shows the part already rebuilt, but not how much is
+        // left, and "can I let go yet" is the only question the user has while
+        // dragging. The count answers it.
+        if canvas.tool == .reorder {
+            if let progress = canvas.reorderProgress {
+                status.append(progress.swept >= progress.total
+                    ? "重排完成 \(progress.total)/\(progress.total) 点 —— 折线已按扫过顺序重建"
+                    : "重排 \(progress.swept)/\(progress.total) 点 —— 继续用圈扫过剩下的点")
+            } else if hasImage {
+                status.append("点重排:当前曲线不到 2 个点,先取点再扫")
+            }
+        }
+        if let extra { status.append(extra) }
+        if hasUnsavedChanges { status.append("未保存") }
+        if !hasImage { status.append("拖入图片也可以打开") }
+
+        let summary = hasImage
+            ? "曲线 \(lines.count) 条 · 数据点 \(pointCount)"
+            : ""
+
+        bitmap.update(step: step,
+                      status: status.joined(separator: "    ·    "),
+                      lineSummary: summary)
+
+        toolbar.update(isLoadingEnabled: hasImage,
+                       canExport: calibrated && pointCount > 0,
+                       canUndo: canvas.canUndo,
+                       canRedo: canvas.canRedo)
+
+        // The menu names the action it would take back. Written here rather than
+        // in `validateMenuItem` because this already runs on every state change
+        // and the two would otherwise be a second place the history is read from.
+        undoMenuItem.title = canvas.undoLabel.map { "撤销 \($0)" } ?? "撤销"
+        undoMenuItem.isEnabled = canvas.canUndo
+        redoMenuItem.title = canvas.redoLabel.map { "重做 \($0)" } ?? "重做"
+        redoMenuItem.isEnabled = canvas.canRedo
+
+        // Last, and deliberately: the title and the edited dot are read off the
+        // state this method has just finished rebuilding the other views from, so
+        // doing it here is what keeps them from describing a moment that has
+        // already gone by.
+        updateDocumentChrome()
+    }
+
+    private func presentError(_ message: String) {
+        let alert = NSAlert()
+        alert.messageText = "无法完成"
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "好")
+        if window.isVisible {
+            alert.beginSheetModal(for: window, completionHandler: nil)
+        } else {
+            alert.runModal()
+        }
+    }
+}
+
+// MARK: - NSWindowDelegate
+
+extension AppDelegate: NSWindowDelegate {
+
+    /// The window's own route to the unsaved-work question, taken before the
+    /// window is allowed to close. `applicationShouldTerminate` covers `⌘Q`; the
+    /// two share one check so the answer cannot differ between them.
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        confirmClosingTheDocument()
+    }
+}
+
+// MARK: - CanvasViewDelegate
+
+extension AppDelegate: CanvasViewDelegate {
+
+    func canvas(_ canvas: CanvasView, didCollectScalePoints anchors: CalibrationAnchors) {
+        CalibrationSheet.present(in: window,
+                                 anchors: anchors,
+                                 previous: nil) { [weak self] map in
+            guard let self else { return }
+            if let map {
+                // The sheet built the map; install it with the anchors that
+                // produced it so the rules are drawn where the user clicked.
+                canvas.applyCalibration(anchors: anchors,
+                                        xStartValue: map.x.valueMin,
+                                        xEndValue: map.x.valueMax,
+                                        yStartValue: map.y.valueMin,
+                                        yEndValue: map.y.valueMax,
+                                        xIsLogarithmic: map.x.isLogarithmic,
+                                        yIsLogarithmic: map.y.isLogarithmic)
+                // Says "move the pointer back" rather than "drag the four markers"
+                // because the markers are no longer sitting on the chart drawing
+                // attention to themselves: they come back when the pointer
+                // approaches one, and the message is the only thing that says so.
+                self.refreshUI("坐标系已设置 —— 鼠标移回标记处可微调,或用「修改标定数值」改数值")
+                canvas.tool = .browse
+            } else {
+                canvas.cancelPendingScale()
+                self.refreshUI("已取消标定")
+            }
+        }
+    }
+
+    func canvasDidChangeState(_ canvas: CanvasView) {
+        refreshUI()
+    }
+
+    /// A parameter the strip shows changed. Its own channel, because the slider
+    /// reports on every frame of a drag while `refreshUI` rebuilds the data
+    /// panel's two tables — and none of these numbers appears in them.
+    func canvas(_ canvas: CanvasView, didChangeParameter parameter: ToolParameter, to value: Double) {
+        bitmap.updateParameter(value: value)
+    }
+
+    func canvas(_ canvas: CanvasView, didFailWith message: String) {
+        presentError(message)
+    }
+
+    func canvas(_ canvas: CanvasView, didRedigitize lineName: String, removed: Int, added: Int) {
+        // Report both halves. "已重取" alone would hide the pass that deleted a
+        // stretch and found nothing to put back, which is the one case the user
+        // needs to know about.
+        var report = "「\(lineName)」重取完成"
+        if removed > 0 { report += " —— 删除 \(removed) 点" }
+        if added > 0 { report += ",重新取到 \(added) 点" }
+        refreshUI(removed > 0 || added > 0 ? report : "这一片没有变化")
+    }
+}
+
+// MARK: - ToolbarDelegate
+
+extension AppDelegate: ToolbarDelegate {
+
+    func toolbar(_ toolbar: ToolbarView, didSelect tool: ToolMode) {
+        // 标定 goes through the guard: an accidental click must not wipe an
+        // existing coordinate system.
+        if tool == .setScale {
+            beginCalibration()
+            return
+        }
+        // Re-selecting the tool already in hand changes nothing on screen, and a
+        // click with no visible effect is indistinguishable from a broken one —
+        // the same reason 适配窗口 answers even when it has nothing to do.
+        //
+        // 浏览 needs this most: it is the tool the window opens in, so the very
+        // first click on it is always a no-op, and "浏览" reads to some users as
+        // "browse for a file" rather than "pan and zoom the canvas". Echoing the
+        // tool's own hint settles both questions at once.
+        if canvas.tool == tool {
+            refreshUI(tool.hint)
+            return
+        }
+        canvas.tool = tool
+        refreshUI()
+    }
+
+    func toolbarDidRequestUndo(_ toolbar: ToolbarView) {
+        undoAction(nil)
+    }
+
+    func toolbarDidRequestRedo(_ toolbar: ToolbarView) {
+        redoAction(nil)
+    }
+
+    func toolbarDidRequestCopy(_ toolbar: ToolbarView) {
+        copyData(nil)
+    }
+
+    func toolbarDidRequestExport(_ toolbar: ToolbarView, from sender: NSView) {
+        presentFormatChooser()
+    }
+
+    func toolbarDidRequestFit(_ toolbar: ToolbarView) {
+        let changed = canvas.zoomToFit()
+        // Say something either way: a button that appears to do nothing is
+        // indistinguishable from a broken one.
+        refreshUI(changed ? "已适配窗口" : "已是适配状态")
+    }
+}
+
+// MARK: - InfoBarDelegate
+
+extension AppDelegate: InfoBarDelegate {
+
+    func infoBar(_ infoBar: InfoBarView, didSetParameter parameter: ToolParameter, to value: Double) {
+        // Each setter clamps to the same range the slider offers, so there is
+        // nothing to guard against here.
+        //
+        // No status message either: the readout beside the knob is the feedback,
+        // and this runs on every frame of a drag.
+        canvas.setValue(value, of: parameter)
+        // Round trip: the canvas is the one that clamps, so the readout is
+        // rewritten from what it settled on rather than from what was asked.
+        infoBar.updateParameter(value: canvas.value(of: parameter))
+    }
+}
+
+// MARK: - SidebarViewDelegate
+
+extension AppDelegate: SidebarViewDelegate {
+
+    func sidebar(_ sidebar: SidebarView, didSelectLine id: UUID) {
+        canvas.selectLine(id: id)
+        refreshUI()
+    }
+
+    func sidebar(_ sidebar: SidebarView, didSetOrder order: PointOrder, for id: UUID) {
+        canvas.setOrder(order, for: id)
+        refreshUI("取点顺序 = \(order.displayName)")
+    }
+
+    func sidebar(_ sidebar: SidebarView, didSetVisible visible: Bool, for id: UUID) {
+        canvas.setVisible(visible, for: id)
+        refreshUI()
+    }
+
+    func sidebar(_ sidebar: SidebarView, didRenameLine id: UUID, to name: String) {
+        canvas.renameLine(id: id, to: name)
+        refreshUI()
+    }
+
+    func sidebarDidRequestAddLine(_ sidebar: SidebarView) {
+        canvas.addLine()
+        refreshUI("已新增曲线 —— 用「取曲线颜色」点这条曲线即可开始取点")
+    }
+
+    func sidebar(_ sidebar: SidebarView, didRequestRemoveLine id: UUID) {
+        canvas.removeLine(id: id)
+        refreshUI("已删除曲线")
+    }
+}

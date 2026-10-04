@@ -1,0 +1,13 @@
+.DS_Store
+/.build
+/Packages
+/.cenv
+xcuserdata/
+DerivedData/
+.swiftpm/configuration/registries.json
+.swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
+.netrc
+
+# 构建产物。scripts/build_universal.sh 每次都会重建,而且每次内容都不同:
+# .app 2.8M + .dmg 1.4M。要分发二进制请走 GitHub Releases。
+/dist
