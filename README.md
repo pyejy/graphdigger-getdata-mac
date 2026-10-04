@@ -1,0 +1,47 @@
+# GraphDigger
+
+从科研图表图像中提取曲线坐标数据的 macOS 应用 —— [GetData Graph Digitizer](http://getdata-graph-digitizer.com/) 的原生复刻。
+
+> `GraphDigger` 是**临时工程代号**,正式产品名待定且需查商标(原版 "GetData" 不建议沿用)。
+
+## 仓库结构
+
+| 路径 | 内容 |
+|---|---|
+| **`GraphDigger/`** | **应用本体**(Swift 6.4 / SwiftPM + AppKit)。完整的功能说明、快捷键、设计取舍见 [`GraphDigger/README.md`](GraphDigger/README.md) |
+| `proto/` | Phase 0 的 Python 参考实现,以及算法精度验证报告 |
+| `GetData复刻_功能需求文档.md` | 功能需求(FRD) |
+| `GetData复刻_开发环境与架构设计.md` | 分层架构设计 |
+| `GraphDigger_点重排工具设计.md` | 「点重排」这个交互的设计记录 |
+
+算法先在 `proto/` 里用 Python 验证过再移植到 Swift,所以那份报告是理解 `GDCore` 里每个阈值从哪来的地方。
+
+## 快速上手
+
+```bash
+cd GraphDigger
+./scripts/build_universal.sh --dmg   # 通用二进制 arm64 + x86_64,产出 .app 与 .dmg
+open dist/GraphDigger.app
+```
+
+需要 Xcode 工具链(实测于 Swift 6.4),最低 macOS 12。
+
+## 它做什么
+
+打开一张论文里的曲线图 → 标定坐标轴 → 取曲线颜色 → 框选取点 → 导出数值。
+
+- **多条曲线各自独立取色**,靠前景掩膜的三道闸门(距离 → 背景 → 色相)分开,不会互相串点
+- 数据点**存像素坐标而非数值**,所以重新标定坐标轴会自动更新全部已提取数据
+- 标定是**四点独立轴**(X/Y 各取两点),两轴不相交的图也能正确标定
+- 整个工作可以存成一个 **`.gdproj` 文件**(图片 + 标定 + 曲线数据),发给别人,对方装了本应用双击就能看到完整工程
+- 导出 CSV / TSV / TXT / XML / DXF / EPS
+
+## 状态
+
+- 通用二进制 arm64 + x86_64,最低 macOS 12
+- 单测 **124/124**;无头端到端自检 **108/108** —— 跑的是发布版二进制本身
+- 精度目标 ≤0.5% 满量程,Phase 0 实测 p95 ≈ 0.17%
+
+## 许可
+
+未定。
