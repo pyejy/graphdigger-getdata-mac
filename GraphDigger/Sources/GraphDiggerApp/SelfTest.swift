@@ -727,6 +727,11 @@ enum SelfTest {
         check("导出小数分隔符真的进了文件:逗号时 1,875000 且 CSV 列改用分号,默认仍是句点",
               separator.passed, separator.detail)
 
+        // --- 多坐标系 (FR-13)-----------------------------------------------
+        let systems = twoCoordinateSystemsConvertTheirOwnCurves()
+        check("同一张图两套坐标系:每条曲线按自己那套换算,选中曲线即切换,挂曲线的删不掉",
+              systems.passed, systems.detail)
+
         // --- 两个「用来看」的视图(FR-1.3 / FR-7.1)-----------------------------
         let hideImage = hidingTheImageTakesNothingAway()
         check("隐藏原图只是不画它:文档不变、位图与掩膜都在,且仍能取点", hideImage.passed, hideImage.detail)
@@ -2920,6 +2925,117 @@ enum SelfTest {
             : "菜单=\(menuOK)(\(separatorItems.count) 项) 读写键一致=\(roundTrips)"
                 + " 逗号输出=\(commaOK)[\(commaCSV ?? "nil")] 勾=\(commaTick)"
                 + " 句点输出=\(dotOK)[\(dotCSV ?? "nil")] XML不变=\(xmlSame)")
+    }
+
+    // MARK: - 多坐标系 (FR-13)
+
+    /// Two panels on one image, each with its own curve.
+    ///
+    /// What is under test is *which* mapping each curve's numbers come from, and
+    /// the only way to see that is to look at the bytes an export produced —
+    /// exactly the reason `exportPayload` exists. The two curves sit at the same
+    /// fraction along their own panel's axes, so a shared mapping would give both
+    /// the same numbers and the check would fail on the numbers rather than on a
+    /// description of them.
+    private static func twoCoordinateSystemsConvertTheirOwnCurves()
+        -> (passed: Bool, detail: String) {
+        let delegate = AppDelegate()
+        delegate.buildMenu()
+        delegate.buildWindow()
+        guard let canvas = delegate.canvas else { return (false, "画布没建出来") }
+
+        // Panel A spans 0–10, panel B spans 0–1000. Both curves sit halfway along
+        // their own axes, so the right answer is 5 and 500 — and 5 and 5 would
+        // mean one mapping was used for both.
+        let panelA = CalibrationMap.linear(xMin: 0, yMin: 0, xMax: 10, yMax: 10,
+                                           pixelXMin: 100, pixelYMin: 700,
+                                           pixelXMax: 500, pixelYMax: 300)
+        let panelB = CalibrationMap.linear(xMin: 0, yMin: 0, xMax: 1000, yMax: 1000,
+                                           pixelXMin: 600, pixelYMin: 700,
+                                           pixelXMax: 1000, pixelYMax: 300)
+        var state = ProjectState()
+        let aID = state.addLine(name: "a", color: RGB8(r: 200, g: 40, b: 40))
+        state.append(points: [PixelPoint(x: 300, y: 500)],
+                     usingDefaultColor: RGB8(r: 0, g: 0, b: 0))
+        state.installCalibration(panelA)
+        state.addCoordinateSystem()
+        let secondSystem = state.activeSystem?.id
+        let bID = state.addLine(name: "b", color: RGB8(r: 40, g: 60, b: 200))
+        state.append(points: [PixelPoint(x: 800, y: 500)],
+                     usingDefaultColor: RGB8(r: 0, g: 0, b: 0))
+        state.installCalibration(panelB)
+        guard state.systems.count == 2, let secondSystem else {
+            return (false, "建不出两套坐标系(只有 \(state.systems.count) 套)")
+        }
+
+        let chart = SyntheticChart.render()
+        guard let cg = SampleChartWriter.makeCGImage(from: chart.buffer),
+              let png = NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:])
+        else { return (false, "造不出测试图") }
+        let document = ProjectDocument(
+            header: ProjectHeader(image: ProjectImageInfo(fileName: "two-panels.png",
+                                                          pixelWidth: chart.buffer.width,
+                                                          pixelHeight: chart.buffer.height),
+                                  state: state),
+            imageData: png)
+        guard canvas.load(project: document) else { return (false, "项目载不进画布") }
+        guard canvas.state.systems.count == 2 else {
+            return (false, "载入后只剩 \(canvas.state.systems.count) 套坐标系")
+        }
+
+        // --- 导出:每条曲线按自己的坐标系换算 -------------------------------
+        let csv = (try? delegate.exportPayload(format: .csv))
+            .flatMap { String(data: $0, encoding: .utf8) }
+        let expected = "x1,y1,x2,y2\n5.000000,5.000000,500.000000,500.000000\n"
+        let exportOK = csv == expected
+
+        // --- 菜单:两套都列出来,勾在当前那套 --------------------------------
+        var systemItems: [NSMenuItem] = []
+        func find(_ menu: NSMenu) {
+            for item in menu.items {
+                if item.submenu?.title == "Active Coordinate System" {
+                    systemItems = item.submenu?.items ?? []
+                    return
+                }
+                if let sub = item.submenu { find(sub) }
+            }
+        }
+        if let main = NSApp.mainMenu { find(main) }
+        let menuOK = systemItems.count == 2
+            && systemItems.filter { $0.state == .on }.count == 1
+        // The tick has to be on the one that is active, not merely on one of them.
+        let tickOnActive = systemItems.first { $0.state == .on }?.representedObject as? String
+            == canvas.state.activeSystem?.id.uuidString
+
+        // --- 行为约定之一:选中曲线即切换活跃坐标系 -------------------------
+        canvas.selectLine(id: aID)
+        let followsSelection = canvas.state.activeSystem?.id == state.systems[0].id
+            && canvas.state.calibration == panelA
+            && canvas.state.calibration(for: canvas.state.lines[1]) == panelB
+
+        // --- 行为约定之三:挂着曲线的坐标系删不掉 ---------------------------
+        let firstSystem = state.systems[0].id
+        let refused = canvas.removeCoordinateSystem(id: firstSystem) == false
+            && canvas.state.systems.count == 2
+        if case .ownsCurves(let count)? = canvas.refusalForRemovingCoordinateSystem(id: firstSystem) {
+            if count != 1 { return (false, "拒绝理由里的曲线数不对:\(count)") }
+        } else {
+            return (false, "删掉挂着一两条曲线的坐标系没有被拒绝")
+        }
+        // 挪走之后就能删了。
+        canvas.selectLine(id: aID)
+        let moved = canvas.assignActiveLine(toSystem: secondSystem)
+        let deleted = moved && canvas.removeCoordinateSystem(id: firstSystem)
+        let oneLeft = canvas.state.systems.count == 1
+
+        let passed = exportOK && menuOK && tickOnActive && followsSelection
+            && refused && deleted && oneLeft
+        return (passed, passed
+            ? "两套坐标系各按自己换算(a=5,b=500)· 菜单列两套且勾在活跃那套"
+                + " · 选中曲线即切换 · 挂曲线的删不掉、挪走后可删"
+            : "导出=\(exportOK)[\(csv ?? "nil")] 菜单=\(menuOK)(\(systemItems.count) 项)"
+                + " 勾在活跃=\(tickOnActive) 跟随选中=\(followsSelection)"
+                + " 拒绝删除=\(refused) 挪走=\(moved) 删掉=\(deleted) 剩一套=\(oneLeft)")
     }
 
     // MARK: - 符号匹配 (scatter symbols)

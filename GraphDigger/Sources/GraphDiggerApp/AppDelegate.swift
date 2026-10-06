@@ -89,6 +89,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// line would say it only after.
     private var decimalSeparatorItems: [DecimalSeparator: NSMenuItem] = [:]
 
+    /// The coordinate-system sub-lists (FR-13), rebuilt by `refreshUI`.
+    ///
+    /// Rebuilt rather than built once because the number of systems is not known
+    /// until a project is open, and because 「坐标系 2」 has to carry the tick that
+    /// says which one is active — the same job the grid-direction submenu does,
+    /// and for the same reason nothing else on screen can do it.
+    private var systemListMenu: NSMenu!
+    private var assignToSystemMenu: NSMenu!
+
     /// The data-space plot (FR-7.1), built the first time it is asked for.
     ///
     /// Held rather than rebuilt so the window keeps its position and size, and
@@ -496,6 +505,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         action: #selector(alignGridToAxisOrigin(_:)), keyEquivalent: "")
         opsMenu.addItem(withTitle: "网格偏移 (Grid Phase)…",
                         action: #selector(setGridPhase(_:)), keyEquivalent: "")
+
+        // ---- Coordinate systems (FR-13) ----------------------------------
+        //
+        // Last in the Operations menu and on its own, because it is the one group
+        // here that is not about a tool: it says *which axes* the next action
+        // belongs to. On a single-system chart nothing in it needs touching, and
+        // on a three-subplot figure it is the only way to say "this curve is in
+        // panel (b)".
+        //
+        // No key equivalents. These are used once per panel at most, and a
+        // shortcut is the wrong affordance for a list whose length is not known
+        // until the project is open.
+        opsMenu.addItem(.separator())
+        let systemsItem = NSMenuItem(title: "坐标系 (Coordinate System)",
+                                     action: nil, keyEquivalent: "")
+        let systemsMenu = NSMenu(title: "Coordinate System")
+        systemsMenu.addItem(withTitle: "新增坐标系 (New Coordinate System)",
+                            action: #selector(addCoordinateSystem(_:)), keyEquivalent: "")
+        systemsMenu.addItem(withTitle: "删除当前坐标系 (Delete Current)",
+                            action: #selector(removeCurrentCoordinateSystem(_:)),
+                            keyEquivalent: "")
+
+        systemsMenu.addItem(.separator())
+        let listItem = NSMenuItem(title: "当前坐标系 (Active)", action: nil, keyEquivalent: "")
+        let listMenu = NSMenu(title: "Active Coordinate System")
+        listItem.submenu = listMenu
+        systemsMenu.addItem(listItem)
+        systemListMenu = listMenu
+
+        systemsMenu.addItem(.separator())
+        let assignItem = NSMenuItem(title: "把当前曲线归到 (Assign Curve To)",
+                                    action: nil, keyEquivalent: "")
+        let assignMenu = NSMenu(title: "Assign Curve To")
+        assignItem.submenu = assignMenu
+        systemsMenu.addItem(assignItem)
+        assignToSystemMenu = assignMenu
+
+        systemsItem.submenu = systemsMenu
+        opsMenu.addItem(systemsItem)
         opsItem.submenu = opsMenu
 
         // ---- View --------------------------------------------------------
@@ -604,7 +652,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func projectSummary(prefix: String) -> String {
         let state = canvas.state
         var parts = ["图片"]
-        if state.calibration != nil { parts.append("标定") }
+        // 「N 套坐标系」 only when there is more than one: with one, nothing about
+        // the summary is new, and every file written before FR-13 reads as it did.
+        if state.systems.count > 1 {
+            parts.append("\(state.systems.count) 套坐标系")
+        } else if state.calibration != nil {
+            parts.append("标定")
+        }
         parts.append("\(state.lines.count) 条曲线 \(state.totalPointCount) 点")
         return "\(prefix)(\(parts.joined(separator: " + ")))"
     }
@@ -987,6 +1041,101 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                   : "导出小数分隔符 = 句点 —— 数值写成 1.5,CSV 的列用逗号分隔")
     }
 
+    // MARK: - Coordinate systems (FR-13)
+
+    /// Adds a coordinate system and makes it the active one.
+    ///
+    /// The new system is uncalibrated, which is the point: the user is adding it
+    // because the next panel's axes are not these axes. Saying so, and saying
+    // which number it got, is the whole of what this has to tell the user —
+    // after this the next four clicks on 「标定坐标系」 land on it, and curves
+    // created from now on belong to it.
+    @objc private func addCoordinateSystem(_ sender: Any?) {
+        guard canvas.buffer != nil else {
+            presentError("先打开一张图表图片,再新增坐标系。")
+            return
+        }
+        let id = canvas.addCoordinateSystem()
+        let ordinal = canvas.state.ordinal(ofSystem: id) ?? canvas.state.systems.count
+        refreshUI("已新增坐标系 \(ordinal) —— 接着标定它 (⌥⌘S),之后新建的曲线都归它")
+    }
+
+    /// Deletes the active system, refusing while curves are still measured in it.
+    ///
+    /// The refusal is an alert rather than a disabled menu item on purpose: it has
+    /// to say *how many* curves and what to do about them, and a greyed-out entry
+    /// cannot. 「一起删掉」 was the other candidate and is the wrong one — deleting
+    /// a system a curve is measured in re-measures that curve in another panel's
+    /// units, and nothing about the picture changes when it happens.
+    @objc private func removeCurrentCoordinateSystem(_ sender: Any?) {
+        guard let id = canvas.state.activeSystem?.id else { return }
+        let ordinal = canvas.state.ordinal(ofSystem: id) ?? 1
+        if let refusal = canvas.refusalForRemovingCoordinateSystem(id: id) {
+            switch refusal {
+            case .lastOne:
+                presentError("至少要留一套坐标系 —— 这是最后一套,删不掉。")
+            case .ownsCurves(let count):
+                presentError("坐标系 \(ordinal) 上还挂着 \(count) 条曲线。"
+                    + "先用「操作 ▸ 坐标系 ▸ 把当前曲线归到」把它们移到别的坐标系,再删。")
+            }
+            return
+        }
+        guard canvas.removeCoordinateSystem(id: id) else { return }
+        refreshUI("已删除坐标系 \(ordinal)")
+    }
+
+    @objc private func chooseCoordinateSystem(_ sender: NSMenuItem) {
+        guard let id = systemID(from: sender) else { return }
+        canvas.selectCoordinateSystem(id: id)
+        let ordinal = canvas.state.ordinal(ofSystem: id) ?? 1
+        refreshUI("当前坐标系 = 第 \(ordinal) 套")
+    }
+
+    @objc private func assignCurrentCurveToSystem(_ sender: NSMenuItem) {
+        guard let id = systemID(from: sender) else { return }
+        guard let line = canvas.state.activeLine else {
+            presentError("先在右侧面板选中一条曲线,再把它归到某个坐标系。")
+            return
+        }
+        guard canvas.assignActiveLine(toSystem: id) else { return }
+        let ordinal = canvas.state.ordinal(ofSystem: id) ?? 1
+        refreshUI("「\(line.name)」已归到第 \(ordinal) 套坐标系 —— 它的数值按那套换算")
+    }
+
+    private func systemID(from item: NSMenuItem) -> UUID? {
+        (item.representedObject as? String).flatMap(UUID.init(uuidString:))
+    }
+
+    /// Rebuilds the two coordinate-system lists from the current state.
+    private func reloadCoordinateSystemMenus() {
+        let state = canvas.state
+        let activeID = state.activeSystem?.id
+
+        systemListMenu.removeAllItems()
+        assignToSystemMenu.removeAllItems()
+        for system in state.systems {
+            let ordinal = state.ordinal(ofSystem: system.id) ?? 0
+            // 「未标定」 in the title because which systems are still waiting is
+            // the question the menu is opened to answer, and the status line only
+            // warns about the active one.
+            let title = "\(ordinal). \(system.name)"
+                + (system.isCalibrated ? "" : "(未标定)")
+            let pick = NSMenuItem(title: title,
+                                  action: #selector(chooseCoordinateSystem(_:)),
+                                  keyEquivalent: "")
+            pick.representedObject = system.id.uuidString
+            pick.state = system.id == activeID ? .on : .off
+            systemListMenu.addItem(pick)
+
+            let assign = NSMenuItem(title: title,
+                                    action: #selector(assignCurrentCurveToSystem(_:)),
+                                    keyEquivalent: "")
+            assign.representedObject = system.id.uuidString
+            assign.isEnabled = state.activeLine != nil
+            assignToSystemMenu.addItem(assign)
+        }
+    }
+
     @objc private func chooseDecimalSeparator(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String,
               let separator = DecimalSeparator(rawValue: raw) else { return }
@@ -1280,10 +1429,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     ///   row count changed and the table genuinely has a stale row.
     private func refreshUI(_ extra: String? = nil, reloadingPanel: Bool = true) {
         let hasImage = canvas.buffer != nil
-        let calibrated = canvas.state.calibration != nil
-        let lines = canvas.state.lines
-        let active = canvas.state.activeLine
-        let pointCount = canvas.state.totalPointCount
+        let state = canvas.state
+        // Two different questions once a project can hold several coordinate
+        // systems. 「这套标定好了吗」 drives the step prompt and the calibration
+        // tools, which act on the active one. 「都标定好了吗」 drives the warning
+        // and whether an export can succeed at all: an export walks every curve,
+        // so one uncalibrated system is enough to make it fail — and claiming
+        // 「标定」 while a second panel is still unmeasured would be a claim the
+        // first export contradicts.
+        let activeCalibrated = state.calibration != nil
+        let fullyCalibrated = state.isFullyCalibrated
+        let lines = state.lines
+        let active = state.activeLine
+        let pointCount = state.totalPointCount
 
         toolbar.setActiveTool(canvas.tool)
 
@@ -1310,7 +1468,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let step: String
         if !hasImage {
             step = "第 1 步:打开一张图表图片 (⌘O)"
-        } else if !calibrated {
+        } else if !activeCalibrated {
             step = canvas.scalePrompt ?? "第 2 步:点「标定坐标系」建立坐标系"
         } else if !activeReady {
             step = active == nil
@@ -1325,7 +1483,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         var status: [String] = []
-        if !calibrated { status.append("⚠️ 未标定") }
+        if !fullyCalibrated {
+            // Named, not just flagged: with three panels 「未标定」 does not say
+            // which of them still needs four clicks, and the user's next move is
+            // to go and calibrate that one.
+            if let index = state.systems.firstIndex(where: { !$0.isCalibrated }) {
+                status.append(state.systems.count > 1
+                              ? "⚠️ 第 \(index + 1) 套坐标系未标定"
+                              : "⚠️ 未标定")
+            }
+        }
+        if state.systems.count > 1, let ordinal = state.activeSystemIndex.map({ $0 + 1 }) {
+            status.append("坐标系 \(ordinal)/\(state.systems.count)")
+        }
         if hasImage {
             if let active, active.lineColor == nil {
                 status.append("⚠️「\(active.name)」未取色")
@@ -1372,7 +1542,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                       lineSummary: summary)
 
         toolbar.update(isLoadingEnabled: hasImage,
-                       canExport: calibrated && pointCount > 0,
+                       canExport: fullyCalibrated && pointCount > 0,
                        canUndo: canvas.canUndo,
                        canRedo: canvas.canRedo)
 
@@ -1403,6 +1573,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for (separator, item) in decimalSeparatorItems {
             item.state = exportDecimalSeparator == separator ? .on : .off
         }
+
+        // The coordinate-system lists, last because they read the very state the
+        // blocks above have just finished describing.
+        reloadCoordinateSystemMenus()
 
         // Last, and deliberately: the title and the edited dot are read off the
         // state this method has just finished rebuilding the other views from, so
