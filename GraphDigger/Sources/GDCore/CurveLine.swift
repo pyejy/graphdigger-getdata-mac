@@ -216,6 +216,24 @@ public struct ProjectState: Equatable, Codable, Sendable {
     /// leaving two sampling schemes to reconcile.
     public var traceSpacing: Int
 
+    /// Diameter of the symbols 符号匹配 looks for, in pixels — its one knob.
+    ///
+    /// Optional for the project-file compatibility rule, and read through
+    /// `symbolDiameter`, which supplies the default. A third sampling setting
+    /// sitting beside the other two, for the same reason: it describes how the
+    /// user is reading the chart, not something about the curve, so running the
+    /// matcher again with a different size replaces the points rather than
+    /// leaving two readings to reconcile.
+    public var markerDiameter: Int?
+
+    /// The symbol diameter to match with, defaulted for a project written before
+    /// the scatter matcher existed.
+    ///
+    /// The literal is duplicated in `CanvasView.markerDiameterDefault` — the two
+    /// files cannot see each other — and a selftest asserts they agree, which is
+    /// the only thing that stops them drifting.
+    public var symbolDiameter: Int { markerDiameter ?? 11 }
+
     /// The four clicked anchors — X start, X end, Y start, Y end. Kept for
     /// drawing the axis rules the user actually traced; the mapping itself
     /// lives in `calibration`. The two axes may have different starts.
@@ -230,6 +248,7 @@ public struct ProjectState: Equatable, Codable, Sendable {
                 gridAxis: GridAxis? = nil,
                 gridOffset: Int? = nil,
                 traceSpacing: Int = 1,
+                markerDiameter: Int? = nil,
                 calibrationAnchors: CalibrationAnchors? = nil) {
         self.calibration = calibration
         self.lines = lines
@@ -240,6 +259,7 @@ public struct ProjectState: Equatable, Codable, Sendable {
         self.gridAxis = gridAxis
         self.gridOffset = gridOffset
         self.traceSpacing = traceSpacing
+        self.markerDiameter = markerDiameter
         self.calibrationAnchors = calibrationAnchors
     }
 

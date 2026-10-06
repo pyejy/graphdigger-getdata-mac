@@ -334,6 +334,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         opsMenu.addItem(.separator())
         addTool("Digitize Area (区域取点)", "gridDigitize", "d")
         addTool("Auto Trace Line (自动跟踪)", "traceDigitize", "t")
+        // ⌘M for Match, next to the two tools it is an alternative to. It would be
+        // Minimize on a Mac with a Window menu; this app builds none, so the key
+        // was free and the mnemonic beats the letter being unclaimed.
+        addTool("Match Symbols (符号匹配)", "symbolMatch", "m")
         addTool("Point Capture (手工取点)", "capture", "p")
         addTool("Eraser (橡皮擦)", "eraser", "e")
         // ⇧⌘E, one modifier over the eraser's ⌘E: this is the same job at a finer
@@ -877,6 +881,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case "pickLineColor":       canvas.tool = .pickLineColor
         case "pickBackgroundColor": canvas.tool = .pickBackgroundColor
         case "gridDigitize":        canvas.tool = .gridDigitize
+        case "symbolMatch":         canvas.tool = .symbolMatch
         case "traceDigitize":       canvas.tool = .traceDigitize
         case "capture":             canvas.tool = .capture
         case "eraser":              canvas.tool = .eraser
@@ -1420,6 +1425,25 @@ extension AppDelegate: SidebarViewDelegate {
     func sidebarDidRequestAddLine(_ sidebar: SidebarView) {
         canvas.addLine()
         refreshUI("已新增曲线 —— 用「取曲线颜色」点这条曲线即可开始取点")
+    }
+
+    /// A 符号匹配 pass. Both the count and the rejections, because the rejections
+    /// are what explain the count: a scatter of forty that yields three is either
+    /// a chart with three symbols on it or a diameter estimate that is far out,
+    /// and only these numbers tell the two apart.
+    func canvas(_ canvas: CanvasView, didMatchSymbols found: Int, replacing: Int,
+                rejectedSmaller: Int, rejectedLarger: Int, rejectedShape: Int) {
+        var message = "符号匹配:找到 \(found) 个符号"
+        if replacing > 0 { message += ",替换了原来的 \(replacing) 个点" }
+        var skipped: [String] = []
+        if rejectedSmaller > 0 { skipped.append("比估计小的 \(rejectedSmaller) 个") }
+        if rejectedLarger > 0 { skipped.append("比估计大的 \(rejectedLarger) 个") }
+        if rejectedShape > 0 { skipped.append("不像符号的 \(rejectedShape) 个") }
+        if !skipped.isEmpty {
+            message += " · 另有 " + skipped.joined(separator: "、")
+                + " 未采用(直径 \(canvas.state.symbolDiameter)px)"
+        }
+        refreshUI(message)
     }
 
     func sidebar(_ sidebar: SidebarView, didRequestRemoveLine id: UUID) {

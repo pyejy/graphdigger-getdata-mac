@@ -245,6 +245,241 @@ public enum SyntheticChart {
                      isLogY: isLogY)
     }
 
+    /// The symbol shapes a synthetic scatter can draw.
+    ///
+    /// More than one because a matcher that passes against circles alone has not
+    /// been tested: a circle's bounding-box centre *is* its ink centre and its
+    /// box is filled 0.785, so both of the obvious wrong implementations — box
+    /// centre instead of centre of mass, and a fill-ratio filter tuned to a disc
+    /// — pass on circles and fail on everything else.
+    public enum MarkerShape: String, Sendable, CaseIterable {
+        case circle
+        case square
+        case triangle
+    }
+
+    /// A scatter plot: disconnected glyphs, and **no** line between them.
+    public struct ScatterChart: Sendable {
+        public var buffer: BitmapBuffer
+        /// Where each symbol's **ink** was drawn, in pixel space — the ground
+        /// truth. For a triangle this is its centroid, which is *not* the centre
+        /// of the box it occupies; recording the box centre here would bake the
+        /// classic mistake into the fixture that exists to catch it.
+        public var markerCentres: [PixelPoint]
+        public var markerShapes: [MarkerShape]
+        public var markerColor: RGB8
+        public var backgroundColor: RGB8
+        public var markerDiameter: Int
+        /// Where a legend key of the same colour was drawn, when one was asked
+        /// for — the thing a matcher must *not* return as a data point.
+        public var legendCentre: PixelPoint?
+        public var legendSide: Int
+        public var axisX0: Int
+        public var axisX1: Int
+        public var axisY0: Int
+        public var axisY1: Int
+        public var xMinValue: Double
+        public var xMaxValue: Double
+        public var yMinValue: Double
+        public var yMaxValue: Double
+        public var isLogY: Bool
+
+        /// Calibration implied by the frame the generator drew.
+        public var calibration: CalibrationMap {
+            CalibrationMap(
+                x: AxisCalibration(pixelMin: Double(axisX0), valueMin: xMinValue,
+                                   pixelMax: Double(axisX1), valueMax: xMaxValue),
+                y: AxisCalibration(pixelMin: Double(axisY0), valueMin: yMinValue,
+                                   pixelMax: Double(axisY1), valueMax: yMaxValue,
+                                   isLogarithmic: isLogY))
+        }
+    }
+
+    /// Colour of the synthetic scatter's symbols. The same red the line charts
+    /// use, so a mask built for one is a mask for the other.
+    public static let scatterColor = RGB8(r: 200, g: 45, b: 45)
+
+    /// Draws a scatter plot: `count` symbols at deterministic positions, on the
+    /// same axis frame as the line charts.
+    ///
+    /// The y values come from a hash of x rather than from a random number
+    /// generator. The fixture has to render identically on every machine and in
+    /// every run — a corpus that shifts underfoot turns a failing test into a
+    /// question about the seed — while still looking like measurements rather
+    /// than a curve, which is the property the matcher is being tested against.
+    ///
+    /// - Parameters:
+    ///   - legendSwatch: draws a key of the same colour at three times the marker
+    ///     size, the way a figure legend does. A matcher that does not filter by
+    ///     size returns it as a data point.
+    ///   - tintedAxes: draws the axis rules in the marker colour. A matcher that
+    ///     does not filter by shape returns their segments as data points.
+    public static func renderScatter(size: (width: Int, height: Int) = (900, 640),
+                                     count: Int = 40,
+                                     markerDiameter: Int = 11,
+                                     shapes: [MarkerShape] = [.circle],
+                                     isLogY: Bool = false,
+                                     legendSwatch: Bool = false,
+                                     tintedAxes: Bool = false) -> ScatterChart {
+        let w = size.width, h = size.height
+        var pixels = [UInt8](repeating: 0, count: w * h * 3)
+        for i in 0..<(w * h) {
+            pixels[i * 3] = background.r
+            pixels[i * 3 + 1] = background.g
+            pixels[i * 3 + 2] = background.b
+        }
+
+        let axX0 = 80, axX1 = w - 40
+        let axY0 = h - 60, axY1 = 40
+        let xMinV = 0.0, xMaxV = 10.0
+        let yMinV = isLogY ? 0.1 : 0.0
+        let yMaxV = isLogY ? 100.0 : 5.0
+
+        @inline(__always)
+        func toPixel(_ xv: Double, _ yv: Double) -> (Double, Double) {
+            let tx = (xv - xMinV) / (xMaxV - xMinV)
+            let ty: Double
+            if isLogY {
+                ty = (log10(yv) - log10(yMinV)) / (log10(yMaxV) - log10(yMinV))
+            } else {
+                ty = (yv - yMinV) / (yMaxV - yMinV)
+            }
+            return (Double(axX0) + tx * Double(axX1 - axX0),
+                    Double(axY0) + ty * Double(axY1 - axY0))
+        }
+
+        @inline(__always)
+        func setPixel(_ x: Int, _ y: Int, _ c: RGB8) {
+            guard x >= 0, x < w, y >= 0, y < h else { return }
+            let i = (y * w + x) * 3
+            pixels[i] = c.r; pixels[i + 1] = c.g; pixels[i + 2] = c.b
+        }
+
+        let axisColor = tintedAxes ? scatterColor : ink
+        for x in axX0...axX1 { setPixel(x, axY0, axisColor) }
+        for y in axY1...axY0 { setPixel(axX0, y, axisColor) }
+
+        // The symbols are round to the pixel so each one is exactly symmetric
+        // about its centre: the matcher's centroid then has to come out equal to
+        // the recorded centre, and a quarter-pixel bias cannot hide in the
+        // fixture's own rounding.
+        let shapes = shapes.isEmpty ? [.circle] : shapes
+        var centres: [PixelPoint] = []
+        var drawnShapes: [MarkerShape] = []
+        let samples = max(1, count)
+        for i in 0..<samples {
+            let tx = samples == 1 ? 0.5 : Double(i) / Double(samples - 1)
+            let xv = xMinV + (xMaxV - xMinV) * (0.05 + 0.90 * tx)
+            // Deterministic hash in [0, 1).
+            let hsh = sin(xv * 12.9898 + 4.1414) * 43758.5453
+            let unit = hsh - hsh.rounded(.down)
+            let yv = isLogY
+                ? yMinV * pow(yMaxV / yMinV, 0.12 + 0.76 * unit)
+                : yMinV + (yMaxV - yMinV) * (0.12 + 0.76 * unit)
+            let (px, py) = toPixel(xv, yv)
+            let shape = shapes[i % shapes.count]
+            let centre = (x: Double(Int(px.rounded())), y: Double(Int(py.rounded())))
+            fillMarker(&pixels, width: w, height: h,
+                       centre: centre, diameter: markerDiameter,
+                       shape: shape, color: scatterColor)
+            centres.append(inkCentre(of: shape, centre: centre, diameter: markerDiameter))
+            drawnShapes.append(shape)
+        }
+
+        var legendCentre: PixelPoint?
+        let legendSide = markerDiameter * 3
+        if legendSwatch {
+            let centre = (x: Double(axX1 - legendSide), y: Double(axY1 + legendSide))
+            fillMarker(&pixels, width: w, height: h, centre: centre,
+                       diameter: legendSide, shape: .square, color: scatterColor)
+            legendCentre = PixelPoint(x: centre.x, y: centre.y)
+        }
+
+        return ScatterChart(buffer: BitmapBuffer(width: w, height: h, pixels: pixels),
+                            markerCentres: centres,
+                            markerShapes: drawnShapes,
+                            markerColor: scatterColor,
+                            backgroundColor: background,
+                            markerDiameter: markerDiameter,
+                            legendCentre: legendCentre,
+                            legendSide: legendSide,
+                            axisX0: axX0, axisX1: axX1,
+                            axisY0: axY0, axisY1: axY1,
+                            xMinValue: xMinV, xMaxValue: xMaxV,
+                            yMinValue: yMinV, yMaxValue: yMaxV,
+                            isLogY: isLogY)
+    }
+
+    /// The centre of the ink a marker of this shape puts down.
+    ///
+    /// A circle and a square are symmetric about the point they are drawn at; a
+    /// triangle is not — its mass sits a third of the way up from the base, one
+    /// sixth of the height above its box centre. Recording the box centre for all
+    /// three would make the fixture agree with the wrong implementation.
+    private static func inkCentre(of shape: MarkerShape, centre: (x: Double, y: Double),
+                                  diameter: Int) -> PixelPoint {
+        switch shape {
+        case .circle, .square:
+            return PixelPoint(x: centre.x, y: centre.y)
+        case .triangle:
+            return PixelPoint(x: centre.x, y: centre.y + Double(diameter) / 6)
+        }
+    }
+
+    private static func fillMarker(_ pixels: inout [UInt8], width w: Int, height h: Int,
+                                   centre: (x: Double, y: Double), diameter: Int,
+                                   shape: MarkerShape, color: RGB8) {
+        let half = Double(max(1, diameter)) / 2
+        let cx = centre.x, cy = centre.y
+        let minX = Int((cx - half).rounded(.down)), maxX = Int((cx + half).rounded(.up))
+        let minY = Int((cy - half).rounded(.down)), maxY = Int((cy + half).rounded(.up))
+
+        for y in minY...maxY {
+            guard y >= 0, y < h else { continue }
+            for x in minX...maxX {
+                guard x >= 0, x < w else { continue }
+                let dx = Double(x) - cx, dy = Double(y) - cy
+                let inside: Bool
+                switch shape {
+                case .circle:
+                    inside = dx * dx + dy * dy <= half * half
+                case .square:
+                    inside = abs(dx) <= half && abs(dy) <= half
+                case .triangle:
+                    // Apex up, base along the bottom of the box. Inside when the
+                    // point is below both edges and above the base.
+                    let apex = Point2(x: cx, y: cy - half)
+                    let left = Point2(x: cx - half, y: cy + half)
+                    let right = Point2(x: cx + half, y: cy + half)
+                    inside = Self.insideTriangle(x: Double(x), y: Double(y),
+                                                 a: apex, b: left, c: right)
+                }
+                if inside {
+                    let i = (y * w + x) * 3
+                    pixels[i] = color.r; pixels[i + 1] = color.g; pixels[i + 2] = color.b
+                }
+            }
+        }
+    }
+
+    private struct Point2 { var x: Double; var y: Double }
+
+    /// Sign-of-area test: inside when the point is on the same side of all three
+    /// directed edges. Written out rather than using a geometry library because
+    /// `GDCore` has none, and one triangle does not justify adding one.
+    private static func insideTriangle(x: Double, y: Double,
+                                       a: Point2, b: Point2, c: Point2) -> Bool {
+        func cross(_ p: Point2, _ q: Point2, _ r: Point2) -> Double {
+            (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x)
+        }
+        let d1 = cross(a, b, Point2(x: x, y: y))
+        let d2 = cross(b, c, Point2(x: x, y: y))
+        let d3 = cross(c, a, Point2(x: x, y: y))
+        let hasNegative = d1 < 0 || d2 < 0 || d3 < 0
+        let hasPositive = d1 > 0 || d2 > 0 || d3 > 0
+        return !(hasNegative && hasPositive)
+    }
+
     private static func stroke(_ pixels: inout [UInt8], width w: Int, height h: Int,
                                points: [PixelPoint], color: RGB8, lineWidth: Int) {
         let r = max(1.0, Double(lineWidth) / 2.0)

@@ -740,6 +740,12 @@ enum SelfTest {
         let table = thePointTableEditsTheDisplayedPoint()
         check("数据表改的是显示序那一行的点,只改被改的那一轴,非法输入被拒", table.passed, table.detail)
 
+        // --- 符号匹配(散点图)------------------------------------------------
+        let symbols = symbolMatchingTakesEverySymbol()
+        check("符号匹配:一次取出全部散点符号,预览随工具/直径刷新,一次撤销即可回退", symbols.passed, symbols.detail)
+        let legend = symbolMatchingLeavesTheLegendAlone()
+        check("同色图例色块不会被当成数据点", legend.passed, legend.detail)
+
         // --- 点重排 -----------------------------------------------------------
         // Same ring, same conversion as the eraser; what is different is that the
         // result is an *order*, so the checks are about what the brush's path
@@ -2792,6 +2798,142 @@ enum SelfTest {
                 + " · 不保存时问了 \(askedOnDiscard) 次 · 已替换=\(replaced)")
     }
 
+    // MARK: - 符号匹配 (scatter symbols)
+
+    /// A canvas with a synthetic scatter plot on it and its symbols' colour
+    /// sampled — the state 符号匹配 starts from.
+    private static func scatterCanvas(count: Int = 30, markerDiameter: Int = 11,
+                                      legendSwatch: Bool = false)
+        -> (canvas: CanvasView, id: UUID, chart: SyntheticChart.ScatterChart)? {
+        let chart = SyntheticChart.renderScatter(count: count, markerDiameter: markerDiameter,
+                                                legendSwatch: legendSwatch)
+        guard let cg = SampleChartWriter.makeCGImage(from: chart.buffer) else { return nil }
+        let image = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+        let frame = NSRect(x: 0, y: 0, width: CGFloat(cg.width), height: CGFloat(cg.height))
+        let window = NSWindow(contentRect: frame, styleMask: [.titled],
+                              backing: .buffered, defer: false)
+        let canvas = CanvasView(frame: frame)
+        window.contentView = canvas
+        window.makeKeyAndOrderFront(nil)
+        canvas.load(image: image)
+        canvas.layoutSubtreeIfNeeded()
+
+        // Sample the colour off the first symbol, through the real handler.
+        canvas.tool = .pickLineColor
+        canvas.addLine()
+        guard let id = canvas.state.activeLineID,
+              let first = chart.markerCentres.first,
+              let pick = dragEvent(canvas, .leftMouseDown, CGPoint(x: first.x, y: first.y))
+        else { return nil }
+        canvas.mouseDown(with: pick)
+        guard canvas.state.lines.first(where: { $0.id == id })?.lineColor != nil else { return nil }
+        return (canvas, id, chart)
+    }
+
+    /// The whole tool, through the mouse handlers, plus the three rules that keep
+    /// the preview honest.
+    ///
+    /// The preview is a picture, so what is asserted is the set it is drawn from:
+    /// that entering the tool computes it, that the diameter knob re-runs it (a
+    /// knob that only affected the *next* press would turn adjusting it into
+    /// guess-and-check), and that leaving the tool drops it — a preview left
+    /// behind would be drawn against a picture edited in the meantime, and rings
+    /// computed from a colour the curve no longer has look exactly like good ones.
+    ///
+    /// And that one match is **one** undo step. The tool mutates the state inside
+    /// the press-and-release gesture, so it must not also record a step of its
+    /// own: doing both leaves the user needing two ⌘Z presses, with the first
+    /// appearing to work.
+    private static func symbolMatchingTakesEverySymbol() -> (passed: Bool, detail: String) {
+        guard let probe = scatterCanvas() else { return (false, "无法构建散点画布") }
+        let canvas = probe.canvas
+        canvas.selectLine(id: probe.id)
+
+        canvas.tool = .symbolMatch
+        let onEntry = canvas.symbolPreview?.points.count ?? -1
+
+        canvas.setValue(3, of: .markerDiameter)
+        let whenTooSmall = canvas.symbolPreview?.points.count ?? -1
+        canvas.setValue(Double(probe.chart.markerDiameter), of: .markerDiameter)
+        let whenRight = canvas.symbolPreview?.points.count ?? -1
+
+        canvas.tool = .browse
+        let droppedOnLeaving = canvas.symbolPreview == nil
+        canvas.tool = .symbolMatch
+
+        // Anywhere on the canvas: the search covers the whole picture.
+        guard click(at: PixelPoint(x: 4, y: 4), on: canvas),
+              let points = canvas.state.lines.first(where: { $0.id == probe.id })?.points else {
+            return (false, "点不下去")
+        }
+        let expected = probe.chart.markerCentres.count
+        var worst = 0.0
+        for centre in probe.chart.markerCentres {
+            worst = max(worst, points.map { hypot($0.x - centre.x, $0.y - centre.y) }.min() ?? .infinity)
+        }
+        // Matching again must not double the curve. The search covers the whole
+        // picture, so an implementation that *appended* would give sixty points on
+        // the second press — and the count would look like "it found twice as
+        // many", which is exactly how a plausible-looking wrong answer reads.
+        var twice = 0
+        if click(at: PixelPoint(x: 8, y: 8), on: canvas) {
+            twice = canvas.state.lines.first(where: { $0.id == probe.id })?.points.count ?? -1
+        } else {
+            twice = -1
+        }
+
+        let label = canvas.undoLabel
+        let undone = canvas.undo()
+        let backToNothing = canvas.state.lines.first(where: { $0.id == probe.id })?.points.isEmpty == true
+        // The step *under* the one just taken must not be the same action again:
+        // a tool that records its own step as well as letting the gesture record
+        // one files 「符号匹配」twice, and the user needs two ⌘Z presses where the
+        // first already looks like it worked. Asserted on the label rather than on
+        // "the stack is empty", because the curve was created and given a colour
+        // first and those are steps of their own.
+        let noSecondHelping = canvas.undoLabel != "符号匹配"
+
+        let passed = onEntry == expected && whenTooSmall == 0 && whenRight == expected
+            && droppedOnLeaving && points.count == expected && worst <= 0.5
+            && twice == expected && label == "符号匹配" && undone == "符号匹配"
+            && backToNothing && noSecondHelping
+        return (passed, passed
+            ? "预览:进入时 \(onEntry) 个 · 直径估小后 \(whenTooSmall) 个 · 调回 \(whenRight) 个 · 离开即清空"
+                + " · 一次取出 \(points.count) 个符号(最大偏差 \(String(format: "%.3f", worst))px)"
+                + " · 再匹配一次仍是 \(twice) 个(不翻倍)"
+                + " · 一次撤销「符号匹配」回到空,栈里没有第二步同名动作"
+            : "预览 进入=\(onEntry) 估小=\(whenTooSmall) 调回=\(whenRight) 离开清空=\(droppedOnLeaving)"
+                + " · 取出=\(points.count)/\(expected) 最大偏差 \(String(format: "%.3f", worst))"
+                + " · 再匹配=\(twice) 标签=\(label ?? "无") 撤销=\(undone ?? "无") 回到空=\(backToNothing)"
+                + " 没有重复记录=\(noSecondHelping)")
+    }
+
+    /// A legend key is the same colour as the data and must not become a point.
+    ///
+    /// The renderer draws it at three times the marker size, which is what a
+    /// figure legend does — and what makes this testable: without a size filter
+    /// the matcher returns it, and the resulting curve has one point sitting in
+    /// the corner of the plot that no measurement ever produced.
+    private static func symbolMatchingLeavesTheLegendAlone() -> (passed: Bool, detail: String) {
+        guard let probe = scatterCanvas(count: 20, legendSwatch: true) else {
+            return (false, "无法构建散点画布")
+        }
+        let canvas = probe.canvas
+        canvas.selectLine(id: probe.id)
+        canvas.tool = .symbolMatch
+        let preview = canvas.symbolPreview
+        let expected = probe.chart.markerCentres.count
+        guard let legend = probe.chart.legendCentre else { return (false, "固定装置没有画出图例") }
+
+        let onData = preview?.points.filter { hypot($0.x - legend.x, $0.y - legend.y) < 40 }.count ?? -1
+        let passed = preview?.points.count == expected && onData == 0
+            && (preview?.rejectedTooLarge ?? 0) >= 1
+        return (passed, passed
+            ? "找到 \(expected) 个符号,图例附近 0 个 · 图例被记为「过大」\(preview?.rejectedTooLarge ?? 0) 个"
+            : "找到 \(preview?.points.count ?? -1)/\(expected),图例附近 \(onData) 个,"
+                + "过大 \(preview?.rejectedTooLarge ?? -1) 个")
+    }
+
     // MARK: - 点编辑与数据表 (FR-6.4 / FR-7.2)
 
     /// Press, drag and release, through the handlers the canvas is driven by.
@@ -3524,6 +3666,7 @@ enum SelfTest {
             ("⌘R", "Re-digitize (重新选点)"),
             ("⌘B", "Reorder Points by Sweep (点重排)"),
             ("⌘E", "Eraser (橡皮擦)"),
+            ("⌘M", "Match Symbols (符号匹配)"),
             ("⇧⌘E", "Edit Point (点编辑)"),
             ("⌘D", "Digitize Area (区域取点)"),
             ("⌘0", "Browse (浏览)"),
@@ -3911,7 +4054,8 @@ enum SelfTest {
             return (false, "\(tool):usesRing=\(tool.usesRing) parameter=\(String(describing: tool.parameter))")
         }
         // And every tool that takes points has to have a number to tune.
-        let takers: Set<ToolMode> = [.gridDigitize, .traceDigitize, .redigitize, .eraser, .reorder]
+        let takers: Set<ToolMode> = [.gridDigitize, .traceDigitize, .redigitize,
+                                     .symbolMatch, .eraser, .reorder]
         let without = ToolMode.allCases.filter { takers.contains($0) && $0.parameter == nil }
         guard without.isEmpty else {
             return (false, "取点工具没有可调参数:\(without.map { "\($0)" }.sorted())")

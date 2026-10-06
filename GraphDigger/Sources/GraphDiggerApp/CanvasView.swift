@@ -24,6 +24,15 @@ enum ToolMode: CaseIterable {
     /// and where each of them sits in the sequence. Nudging one marker should not
     /// do any of that.
     case editPoint
+    /// Finds the symbols of a scatter plot — one point per glyph — and replaces
+    /// the active curve's points with them.
+    ///
+    /// The third digitizer, and the only one for a chart with no path in it. 区域
+    /// 取点 samples column by column and returns two points for a circle a column
+    /// crosses twice; 自动跟踪 walks along ink and stops at the edge of the glyph
+    /// it started on. Neither is wrong — both answer "where is the line", which a
+    /// scatter plot does not have.
+    case symbolMatch
     /// Discards the active curve's points so it can be digitised again.
     case redigitize
     /// Sweeps a ring over the points to renumber them in the order it passed.
@@ -41,6 +50,7 @@ enum ToolMode: CaseIterable {
         case .gridDigitize:        return "区域取点:拖出矩形框选曲线"
         case .traceDigitize:       return "自动跟踪:点击曲线起点"
         case .capture:             return "手工取点:逐点点击"
+        case .symbolMatch:         return "符号匹配:点一下,找出图上所有同色符号的中心(散点图用);直径可在右端调整"
         case .eraser:              return "橡皮擦:圆圈碰到的数据点会被删除,拖拽可连续擦除([ ] 调大小)"
         case .editPoint:           return "点编辑:拖动标记移动它;在两点之间的连线上点一下插入新点;⌫ 删除选中的点"
         case .redigitize:          return "重新选点:在曲线上框出要重取的区间,清空后重新取点"
@@ -79,6 +89,7 @@ enum ToolMode: CaseIterable {
         case .eraser, .reorder:        return .ringRadius
         case .gridDigitize, .redigitize: return .gridSpacing
         case .traceDigitize:           return .traceSpacing
+        case .symbolMatch:             return .markerDiameter
         case .browse, .setScale, .pickLineColor, .pickBackgroundColor, .capture, .editPoint:
             return nil
         }
@@ -103,6 +114,7 @@ enum ToolMode: CaseIterable {
         case .gridDigitize:        return "区域取点"
         case .traceDigitize:       return "自动跟踪"
         case .capture:             return "手工取点"
+        case .symbolMatch:         return "符号匹配"
         case .eraser:              return "擦除"
         // The fallback only. A stroke that actually did something names what it
         // did — 移动点 / 插入点 / 删除点 — because 「撤销 编辑点」 leaves the user
@@ -130,6 +142,8 @@ enum ToolParameter: CaseIterable {
     case gridSpacing
     /// Auto trace's spacing between kept points, in **image pixels** along the path.
     case traceSpacing
+    /// 符号匹配's expected symbol size, in **image pixels** across.
+    case markerDiameter
 
     /// The knob's travel, in the parameter's own unit.
     ///
@@ -144,6 +158,8 @@ enum ToolParameter: CaseIterable {
             return Double(CanvasView.gridSpacingRange.lowerBound)...Double(CanvasView.gridSpacingRange.upperBound)
         case .traceSpacing:
             return Double(CanvasView.traceSpacingRange.lowerBound)...Double(CanvasView.traceSpacingRange.upperBound)
+        case .markerDiameter:
+            return Double(CanvasView.markerDiameterRange.lowerBound)...Double(CanvasView.markerDiameterRange.upperBound)
         }
     }
 
@@ -159,6 +175,10 @@ enum ToolParameter: CaseIterable {
         case .ringRadius:  return "半径 \(whole)"
         case .gridSpacing: return "间距 \(whole)px"
         case .traceSpacing: return "间距 \(whole)px"
+        // "直径" rather than "间距": the number beside a 符号匹配 is the size of
+        // the *thing being found*, not the distance between samples, and reusing
+        // the sampling word would read as though the two were comparable.
+        case .markerDiameter: return "直径 \(whole)px"
         }
     }
 
@@ -172,6 +192,8 @@ enum ToolParameter: CaseIterable {
             return "网格间距 —— 区域取点/重新选点时,相邻扫描线相隔多少像素。数值越小,点越密。"
         case .traceSpacing:
             return "取点密度 —— 自动跟踪时沿曲线每隔多少像素保留一个点。数值越小越密,1 表示每个像素都取。"
+        case .markerDiameter:
+            return "符号直径 —— 符号匹配要找的散点符号在图上有多大(像素)。估计偏差太大时工具会报告「过小/过大」的个数。"
         }
     }
 }
@@ -186,6 +208,15 @@ protocol CanvasViewDelegate: AnyObject {
     /// pass that worked has something to report and is not a failure — the info
     /// bar should say what it took and what it put back.
     func canvas(_ canvas: CanvasView, didRedigitize lineName: String, removed: Int, added: Int)
+    /// A 符号匹配 pass finished: how many symbols were taken, how many points they
+    /// replaced, and how many components were turned down.
+    ///
+    /// The rejections travel with the count because they are the *explanation* of
+    /// it. A scatter of forty points that yields three is either a chart with
+    /// three points on it or a diameter estimate that is far out, and the counts
+    /// are the only thing that tells the user which.
+    func canvas(_ canvas: CanvasView, didMatchSymbols found: Int, replacing: Int,
+                rejectedSmaller: Int, rejectedLarger: Int, rejectedShape: Int)
     /// A number the info bar shows changed, and here is its new value.
     ///
     /// Its own channel rather than `canvasDidChangeState` because a slider
@@ -199,6 +230,9 @@ extension CanvasViewDelegate {
     /// Default for the existing callers: a re-digitise pass that has nothing to
     /// say is not a failure.
     func canvas(_ canvas: CanvasView, didRedigitize lineName: String, removed: Int, added: Int) {}
+    /// Default for the canvases that have no status line to report into.
+    func canvas(_ canvas: CanvasView, didMatchSymbols found: Int, replacing: Int,
+                rejectedSmaller: Int, rejectedLarger: Int, rejectedShape: Int) {}
     /// Default for the callers that show no strip readout — the selftest's
     /// canvases among them.
     func canvas(_ canvas: CanvasView, didChangeParameter parameter: ToolParameter, to value: Double) {}
@@ -386,6 +420,8 @@ final class CanvasView: NSView {
         selectedPointStoredIndex = nil
         draggingPointStoredIndex = nil
         hoveredEditTarget = nil
+        // The restore may have changed a line's colour, and with it its mask.
+        symbolCandidates = nil
         refreshMasks()
         needsDisplay = true
         delegate?.canvasDidChangeState(self)
@@ -451,6 +487,10 @@ final class CanvasView: NSView {
             selectedPointStoredIndex = nil
             pendingEditLabel = nil
             if !tool.tracksPointer { window?.acceptsMouseMovedEvents = false }
+            // Handles both directions: entering the tool computes the candidate
+            // set, and leaving it drops one that would otherwise be drawn the next
+            // time the tool came back, against a picture edited in between.
+            refreshSymbolCandidates()
             needsDisplay = true
             window?.invalidateCursorRects(for: self)
             delegate?.canvasDidChangeState(self)
@@ -509,6 +549,18 @@ final class CanvasView: NSView {
     static let gridSpacingDefault = 8
     static let traceSpacingRange = 1...40
     static let traceSpacingDefault = 1
+
+    /// Travel of the scatter matcher's one knob, in image pixels across, and where
+    /// it starts.
+    ///
+    /// Unlike the two spacings this is a size *of something on the chart* rather
+    /// than a density of sampling, so its ends do not mean symmetric things:
+    /// three pixels is about the smallest marker anyone prints, forty is a marker
+    /// a tenth of the plot wide. The default of eleven comes from measuring what
+    /// the sample charts draw, and is duplicated in `ProjectState.symbolDiameter`,
+    /// which cannot see this file; a selftest asserts the two agree.
+    static let markerDiameterRange = 3...40
+    static let markerDiameterDefault = 11
 
     /// Grows or shrinks the ring, for the `[` `]` keys. The slider in the info
     /// bar sets the radius outright instead.
@@ -619,6 +671,15 @@ final class CanvasView: NSView {
     private var hoverPoint: PixelPoint?
 
     // MARK: - 点编辑 scratch (FR-6.4)
+
+    /// The last 符号匹配 search, or nil when it has not been run for the picture,
+    /// colour and size now on screen.
+    ///
+    /// Cached rather than computed on demand because the preview is drawn every
+    /// frame, and a connected-components pass over a full-size image per redraw
+    /// would be unusable. It is invalidated by its three inputs — the mask, the
+    /// diameter and the tool — and by nothing else.
+    private var symbolCandidates: SymbolMatcher.Result?
 
     /// What a press at the pointer would do — the marker it would grab, or the
     /// spot on the polyline where it would insert one. Nil means the press would
@@ -782,6 +843,7 @@ final class CanvasView: NSView {
         draggingPointStoredIndex = nil
         selectedPointStoredIndex = nil
         pendingEditLabel = nil
+        symbolCandidates = nil
         return true
     }
 
@@ -1046,9 +1108,10 @@ final class CanvasView: NSView {
     /// that honours and clamps them — and the strip reports them.
     func value(of parameter: ToolParameter) -> Double {
         switch parameter {
-        case .ringRadius:   return Double(eraserRadius)
-        case .gridSpacing:  return Double(state.gridSpacing)
-        case .traceSpacing: return Double(state.traceSpacing)
+        case .ringRadius:     return Double(eraserRadius)
+        case .gridSpacing:    return Double(state.gridSpacing)
+        case .traceSpacing:   return Double(state.traceSpacing)
+        case .markerDiameter: return Double(state.symbolDiameter)
         }
     }
 
@@ -1062,10 +1125,29 @@ final class CanvasView: NSView {
     func setValue(_ value: Double, of parameter: ToolParameter) {
         let whole = value.rounded()
         switch parameter {
-        case .ringRadius:   eraserRadius = CGFloat(whole)
-        case .gridSpacing:  setGridSpacing(Int(whole))
-        case .traceSpacing: setTraceSpacing(Int(whole))
+        case .ringRadius:     eraserRadius = CGFloat(whole)
+        case .gridSpacing:    setGridSpacing(Int(whole))
+        case .traceSpacing:   setTraceSpacing(Int(whole))
+        case .markerDiameter: setMarkerDiameter(Int(whole))
         }
+    }
+
+    /// Sets the size 符号匹配 looks for, and re-runs the search with it.
+    ///
+    /// Re-running immediately is the whole point of the knob: the candidates are
+    /// already drawn on the chart, so the user drags it until the rings sit on the
+    /// symbols — a preview that only refreshed on the next press would turn a
+    /// one-second adjustment into guess-and-check. Not undoable: it changes how
+    /// the next match samples, not the data, which is the rule the other sampling
+    /// settings follow too.
+    func setMarkerDiameter(_ value: Int) {
+        let clamped = min(Self.markerDiameterRange.upperBound,
+                          max(Self.markerDiameterRange.lowerBound, value))
+        guard clamped != state.symbolDiameter else { return }
+        state.markerDiameter = clamped
+        refreshSymbolCandidates()
+        delegate?.canvas(self, didChangeParameter: .markerDiameter, to: Double(clamped))
+        delegate?.canvasDidChangeState(self)
     }
 
     /// Colour-distance tolerance for the active curve. Rebuilds that curve's
@@ -1103,6 +1185,125 @@ final class CanvasView: NSView {
                                          backgroundColor: line.backgroundColor)
         maskInputs[id] = MaskInput(color: lineColor, background: line.backgroundColor,
                                    tolerance: line.colorTolerance)
+        // A new mask means a new set of symbols: a preview computed from the old
+        // colour would go on ringing glyphs that no longer match it.
+        refreshSymbolCandidates()
+    }
+
+    // MARK: - 符号匹配 (scatter symbols)
+
+    /// The candidate set the preview is drawing, or nil when there is none.
+    ///
+    /// Read-only, and exposed for the selftest: what the preview *is* — the set of
+    /// symbols it is ringing — is the thing worth asserting, and a stale preview
+    /// is its characteristic failure. Rings computed from a colour the curve no
+    /// longer has look exactly like correct ones.
+    var symbolPreview: SymbolMatcher.Result? { symbolCandidates }
+
+    /// Recomputes the candidate set, or drops it when the tool is not in hand.
+    ///
+    /// Called from every input the search depends on rather than from the draw
+    /// path: `draw` must not mutate state, and a preview recomputed there would
+    /// also recompute on every zoom and every pan.
+    func refreshSymbolCandidates() {
+        guard tool == .symbolMatch, let mask = activeMask else {
+            if symbolCandidates != nil { symbolCandidates = nil; needsDisplay = true }
+            return
+        }
+        symbolCandidates = SymbolMatcher.match(
+            mask: mask,
+            options: SymbolMatcher.Options(expectedDiameter: Double(state.symbolDiameter)))
+        needsDisplay = true
+    }
+
+    /// The candidate rings — one per symbol the matcher would take.
+    ///
+    /// Drawn **before** the press, not after, because the failure that matters
+    /// here is not "it found nothing" (that has a message of its own) but "it
+    /// found the wrong things": a diameter that is slightly out still yields a
+    /// plausible count. Rings landing on the glyphs is the only way to tell a
+    /// right answer from a nearly-right one, and it is what makes the knob usable
+    /// — it is adjusted while looking at them.
+    private func drawSymbolCandidates() {
+        guard tool == .symbolMatch, let result = symbolCandidates, !result.points.isEmpty
+        else { return }
+        let radius: CGFloat = 6
+        // One path for the whole set, so the cost is two strokes whatever the
+        // chart holds rather than two per symbol.
+        let path = NSBezierPath()
+        for point in result.points {
+            let v = transform.viewPoint(fromImage: point)
+            path.appendOval(in: NSRect(x: v.x - radius, y: v.y - radius,
+                                       width: radius * 2, height: radius * 2))
+        }
+        NSColor.white.withAlphaComponent(0.9).setStroke()
+        path.lineWidth = 3.5
+        path.stroke()
+        NSColor.systemPurple.setStroke()
+        path.lineWidth = 1.5
+        path.stroke()
+    }
+
+    /// Replaces the active curve's points with the symbols found.
+    ///
+    /// **Replaces**, not appends. The search covers the whole picture, so running
+    /// it twice would otherwise double every point — and a scatter extraction is a
+    /// whole-curve answer the way 重新选点 is a whole-stretch one: there is no part
+    /// of the curve a second pass is supposed to add to.
+    private func commitSymbolCandidates() {
+        guard let id = state.activeLineID, let line = state.activeLine else {
+            delegate?.canvas(self, didFailWith: "没有可写入的曲线。请先在右侧面板新增或选中一条。")
+            return
+        }
+        guard line.lineColor != nil else {
+            delegate?.canvas(self, didFailWith: "「\(line.name)」还没有取色。"
+                + "请先用「取曲线颜色」点一下散点符号,再回来匹配。")
+            return
+        }
+        if symbolCandidates == nil { refreshSymbolCandidates() }
+        guard let result = symbolCandidates else { return }
+        guard !result.points.isEmpty else {
+            delegate?.canvas(self, didFailWith: symbolEmptyMessage(result))
+            return
+        }
+        let replacing = line.points.count
+        // Straight into the state, **not** through `perform`. This runs inside the
+        // press-and-release gesture that `mouseDown` opened, and `endGesture`
+        // records that whole gesture as one step — so going through `perform` here
+        // would file the same change twice and leave the user needing two ⌘Z
+        // presses to take back one match. Every other tool that acts on a press
+        // mutates `state` directly for the same reason; the gesture is the wrapper
+        // that names the step, and 符号匹配 is already the tool's name.
+        state.replacePoints(of: id, with: result.points)
+        needsDisplay = true
+        delegate?.canvasDidChangeState(self)
+        delegate?.canvas(self, didMatchSymbols: result.points.count,
+                         replacing: replacing,
+                         rejectedSmaller: result.rejectedTooSmall,
+                         rejectedLarger: result.rejectedTooLarge,
+                         rejectedShape: result.rejectedOddShape)
+    }
+
+    /// Why nothing was found, in terms of the knob that would fix it.
+    ///
+    /// "没有找到符号" on its own is the least useful sentence the tool could say.
+    /// The two ways to find nothing are opposite errors in the same number, and
+    /// the rejection counts are what say which way the estimate is out — the
+    /// difference between a user fixing it in one drag and concluding that the
+    /// feature does not work.
+    private func symbolEmptyMessage(_ result: SymbolMatcher.Result) -> String {
+        if result.rejectedTooLarge > 0, result.rejectedTooLarge >= result.rejectedTooSmall {
+            return "没有形状合格的符号:有 \(result.rejectedTooLarge) 个连通域比 \(state.symbolDiameter)px 的估计大得多。"
+                + "把「直径」调大再试;若图上有同色的坐标轴、图例或拟合线,它们也会被算进去。"
+        }
+        if result.rejectedTooSmall > 0 {
+            return "没有形状合格的符号:有 \(result.rejectedTooSmall) 个连通域比估计小得多。把「直径」调小再试。"
+        }
+        if result.rejectedOddShape > 0 {
+            return "找到 \(result.rejectedOddShape) 个连通域,但没有一个像符号(过细或过空)。"
+                + "若图上画的其实是拟合线而不是散点,请改用「区域取点」。"
+        }
+        return "这张图上没有该颜色的符号。请先用「取曲线颜色」点一下要提取的符号。"
     }
 
     /// Makes sure the active curve exists and has a mask, creating a curve when
@@ -1164,6 +1365,7 @@ final class CanvasView: NSView {
         drawCalibrationOverlay()
         drawCurves()
         drawEditingOverlay()
+        drawSymbolCandidates()
         drawPendingScalePoints()
         drawDragRect()
         drawToolRing()
@@ -1841,6 +2043,12 @@ final class CanvasView: NSView {
             hoverPoint = imagePoint
             erase(at: imagePoint)
 
+        case .symbolMatch:
+            // Anywhere on the canvas: the search covers the whole picture, so
+            // asking the user to click *on* something would suggest the click
+            // chose a region, and it does not.
+            commitSymbolCandidates()
+
         case .editPoint:
             // Not gated on `isInsideImage`: the pointer is measured in view space,
             // where a marker near the edge is still grabbable from just outside
@@ -2047,6 +2255,10 @@ final class CanvasView: NSView {
         // disappearing-item cursor means "this is about to go", which is the
         // opposite of what a press does here.
         case .editPoint: cursor = .pointingHand
+        // A crosshair like the other point-takers, but not the crosshair *alone*:
+        // this tool acts on the whole picture, and a crosshair suggests the click
+        // is aimed at a place. The candidate rings are what carry the meaning.
+        case .symbolMatch: cursor = .crosshair
         case .redigitize: cursor = .crosshair
         case .setScale, .capture, .pickLineColor, .pickBackgroundColor:
             cursor = .crosshair
