@@ -513,13 +513,6 @@ public struct ProjectState: Equatable, Codable, Sendable {
         calibration(forSystem: line.calibrationID)
     }
 
-    public func calibration(forLineID id: UUID?) -> CalibrationMap? {
-        guard let id, let line = lines.first(where: { $0.id == id }) else {
-            return activeCalibration
-        }
-        return calibration(for: line)
-    }
-
     public func calibration(forSystem id: UUID?) -> CalibrationMap? {
         guard let id else { return nil }
         return systems.first { $0.id == id }?.calibration

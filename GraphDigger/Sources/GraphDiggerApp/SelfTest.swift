@@ -3009,9 +3009,10 @@ enum SelfTest {
 
         // --- 行为约定之一:选中曲线即切换活跃坐标系 -------------------------
         canvas.selectLine(id: aID)
+        let bCurve = canvas.state.lines.first { $0.id == bID }
         let followsSelection = canvas.state.activeSystem?.id == state.systems[0].id
             && canvas.state.calibration == panelA
-            && canvas.state.calibration(for: canvas.state.lines[1]) == panelB
+            && (bCurve.map { canvas.state.calibration(for: $0) == panelB } ?? false)
 
         // --- 行为约定之三:挂着曲线的坐标系删不掉 ---------------------------
         let firstSystem = state.systems[0].id
@@ -3028,14 +3029,48 @@ enum SelfTest {
         let deleted = moved && canvas.removeCoordinateSystem(id: firstSystem)
         let oneLeft = canvas.state.systems.count == 1
 
+        // --- 侧栏:resolver 给出即权威,不借活跃坐标系的映射 -------------------
+        // A curve whose own system has no calibration, shown in a panel whose
+        // default mapping is a *different*, calibrated one. Reading the default's
+        // numbers for this curve would be the neighbouring-panel failure the
+        // exporter refuses — so the panel must show pixels and say 「未标定」.
+        var sideState = ProjectState()
+        let orphanID = sideState.addLine(name: "orphan", color: RGB8(r: 1, g: 2, b: 3))
+        sideState.append(points: [PixelPoint(x: 300, y: 500)],
+                         usingDefaultColor: RGB8(r: 0, g: 0, b: 0))
+        sideState.addCoordinateSystem()
+        // Calibrates the new, active system — not the one the curve lives in.
+        sideState.installCalibration(panelA)
+        let side = SidebarView(frame: NSRect(x: 0, y: 0, width: 264, height: 700))
+        side.update(lines: sideState.lines,
+                    calibration: sideState.calibration,
+                    activeID: orphanID,
+                    resolvingWith: { sideState.calibration(for: $0) })
+        side.layoutSubtreeIfNeeded()
+        let sidePointTable = descendants(of: side).compactMap { $0 as? NSTableView }
+            .first { $0.tableColumns.map(\.identifier.rawValue) == ["index", "x", "y"] }
+        let xCell = sidePointTable.flatMap { table in
+            side.tableView(table, viewFor: table.tableColumns[1], row: 0)
+        }
+        let xText = xCell.flatMap {
+            descendants(of: $0).compactMap { $0 as? NSTextField }.first?.stringValue
+        }
+        let sideHeading = descendants(of: side).compactMap { $0 as? NSTextField }
+            .first { $0.stringValue.hasPrefix("数据点 ·") }?.stringValue
+        // The pixel is 300; panelA would read that same pixel as 5 — showing 5
+        // here would be the other panel's units wearing this curve's points.
+        let sidebarAuthoritative = xText == "300.000000"
+            && (sideHeading?.contains("未标定") ?? false)
+
         let passed = exportOK && menuOK && tickOnActive && followsSelection
-            && refused && deleted && oneLeft
+            && refused && deleted && oneLeft && sidebarAuthoritative
         return (passed, passed
             ? "两套坐标系各按自己换算(a=5,b=500)· 菜单列两套且勾在活跃那套"
-                + " · 选中曲线即切换 · 挂曲线的删不掉、挪走后可删"
+                + " · 选中曲线即切换 · 挂曲线的删不掉、挪走后可删 · 侧栏不借别套映射"
             : "导出=\(exportOK)[\(csv ?? "nil")] 菜单=\(menuOK)(\(systemItems.count) 项)"
                 + " 勾在活跃=\(tickOnActive) 跟随选中=\(followsSelection)"
-                + " 拒绝删除=\(refused) 挪走=\(moved) 删掉=\(deleted) 剩一套=\(oneLeft)")
+                + " 拒绝删除=\(refused) 挪走=\(moved) 删掉=\(deleted) 剩一套=\(oneLeft)"
+                + " 侧栏权威=\(sidebarAuthoritative)[x=\(xText ?? "nil") 头=\(sideHeading ?? "nil")]")
     }
 
     // MARK: - 符号匹配 (scatter symbols)

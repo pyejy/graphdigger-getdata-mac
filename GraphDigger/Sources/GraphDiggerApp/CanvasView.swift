@@ -2714,7 +2714,10 @@ final class CanvasView: NSView {
               displayIndex >= 0, displayIndex < line.points.count else { return false }
         let storedIndex = line.orderedPointIndices[displayIndex]
         var updated = line.points[storedIndex]
-        if let calibration = state.calibration {
+        // The curve's own coordinate system, not merely the active one (FR-13):
+        // selecting a curve does make its system active, so the two agree today,
+        // but what a typed number *means* is fixed by the curve it lands on.
+        if let calibration = state.calibration(for: line) {
             do {
                 switch axis {
                 case .x: updated.x = try calibration.x.pixel(atValue: value)

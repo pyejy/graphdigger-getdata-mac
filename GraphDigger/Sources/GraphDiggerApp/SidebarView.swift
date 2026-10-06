@@ -73,10 +73,13 @@ final class SidebarView: NSView {
     private var calibrationFor: CalibrationResolver?
     private var activeID: UUID?
 
-    /// The mapping for one curve: its own when the caller knows which, the
-    /// project's single one otherwise.
+    /// The mapping for one curve. A resolver, once supplied, is authoritative —
+    /// same rule as `Exporter.map(for:resolver:)`: a curve whose own system has
+    /// no mapping gets nil, not the active system's numbers, because those would
+    /// be a neighbouring panel's units wearing this curve's points.
     private func calibration(for line: CurveLine) -> CalibrationMap? {
-        calibrationFor?(line) ?? calibration
+        guard let calibrationFor else { return calibration }
+        return calibrationFor(line)
     }
 
     /// Set while `update` reasserts the selected row. Selecting a row posts a
@@ -652,7 +655,12 @@ extension SidebarView: NSTableViewDelegate {
         case "index":
             return "\(row + 1)"
         default:
-            guard let map = activeLine.map({ self.calibration(for: $0) }) ?? calibration,
+            // Only the curve's own mapping. `calibration(for:)` is already the
+            // panel default when no resolver was given, so there is nothing to
+            // fall back to here — and falling back to it would show another
+            // system's units for this curve's points.
+            guard let line = activeLine,
+                  let map = calibration(for: line),
                   let data = try? map.data(fromPixel: pixel) else {
                 // Without a calibration the pixel coordinates are still useful —
                 // and honest about not being the chart's values.
