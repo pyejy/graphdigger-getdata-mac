@@ -12,6 +12,45 @@ extension UTType {
                                            conformingTo: .data)
 }
 
+/// Where the export preference is remembered between launches.
+///
+/// Two closures rather than a `UserDefaults` handed in whole, because the only
+/// way to get an *isolated* `UserDefaults` is `UserDefaults(suiteName:)` — and
+/// that writes a file into the user's Preferences folder which it then **leaves
+/// there** even after `removePersistentDomain`. (Measured: the first cut of this
+/// feature did exactly that and left a 42-byte `GraphDiggerSelftest.plist`
+/// behind.) The selftest is a real run of the real binary and gets run often, so
+/// with this shape "the test writes nothing to disk" is a property of the type
+/// rather than a promise in a comment.
+struct ExportPreferenceStore {
+
+    var read: (_ key: String) -> String?
+    var write: (_ key: String, _ value: String) -> Void
+
+    /// The app's own.
+    ///
+    /// The preference survives a relaunch because this reads and writes
+    /// `UserDefaults.standard`, whose domain comes from the bundle identifier
+    /// the Finder launches the app under.
+    ///
+    /// **Not covered by the selftest, deliberately.** Verifying it would mean
+    /// writing a real preference on the machine that ran the test, which costs
+    /// the person who ran it more than these two lines can be wrong about.
+    static let userDefaults = ExportPreferenceStore(
+        read: { UserDefaults.standard.string(forKey: $0) },
+        write: { UserDefaults.standard.set($1, forKey: $0) })
+
+    /// An in-memory instance for the selftest. Nothing reaches the disk, and
+    /// nothing outlives the process — which is the point.
+    static func inMemory() -> ExportPreferenceStore {
+        final class Storage { var values: [String: String] = [:] }
+        let storage = Storage()
+        return ExportPreferenceStore(
+            read: { storage.values[$0] },
+            write: { storage.values[$0] = $1 })
+    }
+}
+
 /// Window, menu bar, toolbar, sheets and dialogs.
 ///
 /// The toolbar carries the everyday workflow; the menu bar keeps the same
@@ -78,19 +117,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Export preferences
 
-    /// Where the export preference is remembered between launches.
+    /// Where the preference is remembered. Swapped by the selftest — see
+    /// `ExportPreferenceStore`.
     ///
-    /// `UserDefaults` and not the project file, because it is not a property of
-    /// the chart: which spelling of `1.5` the file needs depends on the
-    /// spreadsheet at the far end, so the same project may have to go out both
-    /// ways in one afternoon. Which also means it must survive a launch — a
-    /// European user who has to re-pick it every morning will simply forget, and
-    /// then wonder why a colleague's Excel shows one column of text.
-    ///
-    /// **A seam, not a convenience.** The selftest is a real run of the real
-    /// binary, so writing through `.standard` there would quietly change the
-    /// setting of whoever ran it. The selftest points this at a throwaway suite.
-    var exportPreferences: UserDefaults = .standard
+    /// Defaults and not the project file, because this is not a property of the
+    /// chart: which spelling of `1.5` a file needs depends on the spreadsheet at
+    /// the far end, so the same project may have to go out both ways in one
+    /// afternoon. Which also means it has to survive a relaunch — someone who has
+    /// to re-pick it every morning will forget, and then wonder why a colleague's
+    /// Excel shows one column of text.
+    var exportPreferenceStore: ExportPreferenceStore = .userDefaults
 
     private static let decimalSeparatorKey = "decimalSeparator"
 
@@ -99,10 +135,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// never disagree about it.
     var exportDecimalSeparator: DecimalSeparator {
         get {
-            exportPreferences.string(forKey: Self.decimalSeparatorKey)
+            exportPreferenceStore.read(Self.decimalSeparatorKey)
                 .flatMap(DecimalSeparator.init(rawValue:)) ?? .dot
         }
-        set { exportPreferences.set(newValue.rawValue, forKey: Self.decimalSeparatorKey) }
+        set { exportPreferenceStore.write(Self.decimalSeparatorKey, newValue.rawValue) }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {

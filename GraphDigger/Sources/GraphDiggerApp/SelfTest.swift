@@ -2817,20 +2817,21 @@ enum SelfTest {
     /// that reaches the menu and not the exporter looks exactly like this one
     /// working, right up to the moment a colleague opens the file.
     ///
-    /// Run against a throwaway defaults suite. The selftest is a real run of the
-    /// real binary, so writing through `.standard` here would leave the setting
-    /// changed for whoever ran it — a test that quietly rewrites the user's
-    /// preferences is worse than no test.
+    /// Run against a store that only lives in memory. The selftest is a real run
+    /// of the real binary, so writing the preference through
+    /// `UserDefaults.standard` here would leave it changed for whoever ran it.
+    ///
+    /// What that trades away, stated plainly: this no longer proves the setting
+    /// survives a relaunch. That property is `ExportPreferenceStore.userDefaults`
+    /// — two closures calling `UserDefaults.standard` — and it is not asserted
+    /// anywhere, because asserting it means writing a real preference on the
+    /// machine that ran the test. A first cut of this check used
+    /// `UserDefaults(suiteName:)` and `removePersistentDomain` to have both; it
+    /// left a 42-byte plist in the user's Preferences folder, which was noticed
+    /// by looking rather than by reasoning.
     private static func theDecimalSeparatorReachesTheExportedBytes() -> (passed: Bool, detail: String) {
-        let suiteName = "GraphDiggerSelftest"
-        guard let suite = UserDefaults(suiteName: suiteName) else {
-            return (false, "建不出测试用的偏好域")
-        }
-        suite.removePersistentDomain(forName: suiteName)
-        defer { suite.removePersistentDomain(forName: suiteName) }
-
         let delegate = AppDelegate()
-        delegate.exportPreferences = suite
+        delegate.exportPreferenceStore = .inMemory()
         delegate.buildMenu()
         delegate.buildWindow()
         guard let canvas = delegate.canvas else { return (false, "画布没建出来") }
@@ -2880,12 +2881,13 @@ enum SelfTest {
 
         // 逗号 —— 数值写成 1,5,CSV 的列必须改用分号。
         delegate.setDecimalSeparator(.comma)
-        // A second delegate on the same suite: the setting has to survive the
-        // launch, which is the whole reason it lives in defaults rather than in
-        // the view.
+        // The setter and the getter have to agree on the key. A second delegate
+        // reading the same store is the cheapest way to say so, and the failure it
+        // catches is a real one: a setter writing one key while the getter reads
+        // another looks exactly like this feature working, right up to the export.
         let remembered = AppDelegate()
-        remembered.exportPreferences = suite
-        let survives = remembered.exportDecimalSeparator == .comma
+        remembered.exportPreferenceStore = delegate.exportPreferenceStore
+        let roundTrips = remembered.exportDecimalSeparator == .comma
 
         let commaCSV = (try? delegate.exportPayload(format: .csv))
             .flatMap { String(data: $0, encoding: .utf8) }
@@ -2912,10 +2914,10 @@ enum SelfTest {
         delegate.setDecimalSeparator(.dot)
         let xmlSame = dotXML != nil && dotXML == commaXML
 
-        let passed = menuOK && survives && commaOK && commaTick && dotOK && xmlSame
+        let passed = menuOK && roundTrips && commaOK && commaTick && dotOK && xmlSame
         return (passed, passed
-            ? "逗号:1,875000 · CSV 用分号 · 剪贴板同步 · 换次启动仍记得 · 句点下与旧文件逐字节相同 · XML 不受影响"
-            : "菜单=\(menuOK)(\(separatorItems.count) 项) 记住=\(survives)"
+            ? "逗号:1,875000 · CSV 用分号 · 剪贴板同步 · 读写键一致 · 句点下与旧文件逐字节相同 · XML 不受影响"
+            : "菜单=\(menuOK)(\(separatorItems.count) 项) 读写键一致=\(roundTrips)"
                 + " 逗号输出=\(commaOK)[\(commaCSV ?? "nil")] 勾=\(commaTick)"
                 + " 句点输出=\(dotOK)[\(dotCSV ?? "nil")] XML不变=\(xmlSame)")
     }
