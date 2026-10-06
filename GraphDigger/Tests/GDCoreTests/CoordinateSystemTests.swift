@@ -237,20 +237,23 @@ final class CoordinateSystemTests: XCTestCase {
         let (state, _, _) = twoPanelState()
         XCTAssertTrue(state.isFullyCalibrated)
 
-        // Clear the panel that is *not* being looked at and leave the active one
-        // calibrated. The window would then read 标定完成, and the next export —
-        // which walks every curve — would fail on the other panel. That is the
-        // claim the status line must not make, so `isFullyCalibrated` has to be
-        // about all of them and `calibration` about the one in hand.
+        // Clear the *second* system — the one not being looked at — and leave the
+        // active one calibrated. The window would then read 标定完成 and the next
+        // export, which walks every curve, would fail on the other panel. That is
+        // the claim the status line must not make.
+        //
+        // It has to be the second one specifically: a check that only ever
+        // uncalibrates the first would pass for an implementation that looked at
+        // nothing but `systems[0]`.
         var partial = state
-        partial.setActiveCoordinateSystem(id: partial.systems[0].id)
-        partial.clearCalibration()
         partial.setActiveCoordinateSystem(id: partial.systems[1].id)
+        partial.clearCalibration()
+        partial.setActiveCoordinateSystem(id: partial.systems[0].id)
 
-        XCTAssertFalse(partial.isFullyCalibrated)
+        XCTAssertFalse(partial.isFullyCalibrated, "第二套还没标定,不能算都标定好了")
         XCTAssertNotNil(partial.calibration, "活跃那套还标定着")
-        XCTAssertNil(partial.calibration(for: partial.lines[0]), "但曲线 a 的那套没了")
-        XCTAssertEqual(partial.calibration, panelB())
+        XCTAssertEqual(partial.calibration, panelA())
+        XCTAssertNil(partial.calibration(for: partial.lines[1]), "但曲线 b 的那套没了")
     }
 
     // MARK: - The file format
