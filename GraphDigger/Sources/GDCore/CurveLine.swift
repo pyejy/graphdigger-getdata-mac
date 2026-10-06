@@ -81,10 +81,52 @@ public struct CurveLine: Identifiable, Equatable, Codable, Sendable {
     /// `sweptCount` of `orderedPoints`. When there is no sweep to show it equals
     /// the point count, so nothing is ever dimmed by accident.
     public var orderedPointsAndSweptCount: (points: [PixelPoint], sweptCount: Int) {
+        let (indices, sweptCount) = orderedPointIndicesAndSweptCount
+        return (indices.map { points[$0] }, sweptCount)
+    }
+
+    /// The same thing again, as **indices into `points`**.
+    ///
+    /// What an editor needs, and the reason it exists rather than the points
+    /// themselves: the marker drawn at display position *k* is stored at index
+    /// `orderedPointIndices[k]`, and those are different numbers on any curve
+    /// whose order is not 取点顺序 — sorted, reversed, or swept. Dragging by
+    /// display position would move a different point from the one under the
+    /// cursor, which is a bug that looks like the drag working.
+    ///
+    /// `orderedPointsAndSweptCount` is computed from this one, so the two cannot
+    /// drift; a test asserts `points[indices]` equals the points it returns.
+    public var orderedPointIndicesAndSweptCount: (indices: [Int], sweptCount: Int) {
         if order == .swept, let sweptOrder, !sweptOrder.isEmpty {
-            return SweepReorder.resolve(points, sequence: sweptOrder)
+            return SweepReorder.resolveIndices(pointCount: points.count, sequence: sweptOrder)
         }
-        return (order.apply(to: points), points.count)
+        return (order.applyIndices(to: points), points.count)
+    }
+
+    /// The display order, as stored indices.
+    public var orderedPointIndices: [Int] { orderedPointIndicesAndSweptCount.indices }
+
+    /// Where a point dropped into the segment between two displayed neighbours
+    /// belongs in the stored sequence.
+    ///
+    /// `displayIndex` is the earlier end of the segment as drawn, so the answer
+    /// is a stored position in `0...points.count`.
+    ///
+    /// The naive answer — "just after the point on the left" — is right only
+    /// while the display order runs the same way as the stored array. On a
+    /// reversed or swept curve the two displayed neighbours are stored at indices
+    /// that run *downhill*, and inserting on the high side of the earlier one
+    /// puts the new point at the opposite end of the polyline from the segment
+    /// the user clicked. Picking the side that points toward the segment's other
+    /// end is what makes the rule independent of which order is showing.
+    ///
+    /// Lives here rather than in the canvas because it is arithmetic on the
+    /// order, not on the screen, and a unit test can pin every order mode.
+    public func storedInsertionIndex(betweenDisplayIndex displayIndex: Int) -> Int? {
+        let indices = orderedPointIndices
+        guard displayIndex >= 0, displayIndex + 1 < indices.count else { return nil }
+        let this = indices[displayIndex], next = indices[displayIndex + 1]
+        return next > this ? this + 1 : this
     }
 
     /// How many of this curve's points the ring brush has numbered.
@@ -108,6 +150,18 @@ public struct CurveLine: Identifiable, Equatable, Codable, Sendable {
 
     /// Diagnostic on the current order, for warning about a badly ordered line.
     public var orderDiagnosis: OrderDiagnosis { OrderDiagnosis(points: orderedPoints) }
+}
+
+/// Which of a point's two numbers is being written.
+///
+/// A named pair rather than a `Bool` or a leading `x:`/`y:` pair of methods,
+/// because the two are symmetric: the sidebar's editable cells, the canvas'
+/// drag, and anything that reads them back all treat the axes the same way, and
+/// a signature that says `axis:` documents the symmetry where a `horizontal:`
+/// flag would invite it being read as "the other one" somewhere.
+public enum PointCoordinate: String, CaseIterable, Codable, Sendable {
+    case x
+    case y
 }
 
 /// Everything about a digitising session except the image itself, which belongs
@@ -344,6 +398,56 @@ public struct ProjectState: Equatable, Codable, Sendable {
         let removed = lines[lineIndex].points.remove(at: index)
         invalidateSweep(at: lineIndex)
         return removed
+    }
+
+    /// Moves one point to a new position in pixel space — FR-6.4.
+    ///
+    /// The index is into the **stored** sequence, not the displayed one; callers
+    /// with a position on screen go through `CurveLine.orderedPointIndices`
+    /// first. See the note there for why that conversion is not optional.
+    ///
+    /// **The sweep record survives this**, unlike an insert or a delete, and that
+    /// is the whole reason this is a method of its own rather than a call to
+    /// `replacePoints`. `sweptOrder` holds *indices*, and a move changes no
+    /// index — the sequence still names the same points in the same order. To
+    /// drop it anyway would mean a user who nudged one marker three pixels lost
+    /// the ordering of a curve that took a minute of sweeping to get right, and
+    /// would not find out until the polyline rearranged itself.
+    ///
+    /// Returns whether the point actually moved, so a press that ends without
+    /// travel records no undo step.
+    @discardableResult
+    public mutating func movePoint(of id: UUID, at index: Int, to point: PixelPoint) -> Bool {
+        guard let lineIndex = lines.firstIndex(where: { $0.id == id }),
+              index >= 0, index < lines[lineIndex].points.count else { return false }
+        guard lines[lineIndex].points[index] != point else { return false }
+        lines[lineIndex].points[index] = point
+        return true
+    }
+
+    /// Inserts a point into the stored sequence at `index` — FR-6.4.
+    ///
+    /// `index` is a stored position in `0...points.count`, and the caller is
+    /// expected to have worked out which position puts the new point between the
+    /// two markers the user clicked between *in the order being displayed*. That
+    /// is not simply "after the one on the left": on a reversed or swept curve
+    /// the neighbouring stored indices can run downhill, and inserting on the
+    /// wrong side of one puts the new point at the far end of the polyline. The
+    /// rule lives in the canvas, where the display order is known, and the tests
+    /// assert the outcome — the new point's neighbours in display order are the
+    /// segment's two ends.
+    ///
+    /// Unlike a move, this **drops the sweep**: the whole sequence is a list of
+    /// indices and every one after the insertion point now means a different
+    /// point, so keeping it would rearrange the curve according to a record that
+    /// no longer describes it.
+    @discardableResult
+    public mutating func insertPoint(of id: UUID, at index: Int, point: PixelPoint) -> Bool {
+        guard let lineIndex = lines.firstIndex(where: { $0.id == id }),
+              index >= 0, index <= lines[lineIndex].points.count else { return false }
+        lines[lineIndex].points.insert(point, at: index)
+        invalidateSweep(at: lineIndex)
+        return true
     }
 
     // MARK: - Sweep reorder

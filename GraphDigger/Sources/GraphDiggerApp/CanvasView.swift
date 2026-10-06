@@ -12,6 +12,18 @@ enum ToolMode: CaseIterable {
     case traceDigitize
     case capture
     case eraser
+    /// Moves, inserts and deletes a **single** marker — FR-6.4.
+    ///
+    /// Everything above acts on a *set* of points: a rectangle's worth, a ring's
+    /// worth. This one acts on the marker under the pointer, which is what is
+    /// left to fix when the sampling was right and one point came out a few
+    /// pixels off the curve. It is its own tool rather than a modifier on the
+    /// eraser because the two have opposite capabilities — the eraser can only
+    /// remove, and its reach is a ring the user sizes for bulk work — and because
+    /// 重新选点 re-takes a *stretch*, which changes how many points the curve has
+    /// and where each of them sits in the sequence. Nudging one marker should not
+    /// do any of that.
+    case editPoint
     /// Discards the active curve's points so it can be digitised again.
     case redigitize
     /// Sweeps a ring over the points to renumber them in the order it passed.
@@ -30,6 +42,7 @@ enum ToolMode: CaseIterable {
         case .traceDigitize:       return "自动跟踪:点击曲线起点"
         case .capture:             return "手工取点:逐点点击"
         case .eraser:              return "橡皮擦:圆圈碰到的数据点会被删除,拖拽可连续擦除([ ] 调大小)"
+        case .editPoint:           return "点编辑:拖动标记移动它;在两点之间的连线上点一下插入新点;⌫ 删除选中的点"
         case .redigitize:          return "重新选点:在曲线上框出要重取的区间,清空后重新取点"
         case .reorder:             return "点重排:用圈扫过曲线,扫到的点按先后重新编号([ ] 调大小)"
         }
@@ -46,7 +59,7 @@ enum ToolMode: CaseIterable {
 
     /// Whether the tool paints something on the canvas as the pointer moves.
     /// Only these need mouse-move tracking, which costs a redraw per event.
-    var tracksPointer: Bool { usesRing || self == .redigitize }
+    var tracksPointer: Bool { usesRing || self == .redigitize || self == .editPoint }
 
     /// The number this tool works by, which the info bar's right end shows and
     /// lets the user drag, or nil for the tools that have none.
@@ -66,7 +79,7 @@ enum ToolMode: CaseIterable {
         case .eraser, .reorder:        return .ringRadius
         case .gridDigitize, .redigitize: return .gridSpacing
         case .traceDigitize:           return .traceSpacing
-        case .browse, .setScale, .pickLineColor, .pickBackgroundColor, .capture:
+        case .browse, .setScale, .pickLineColor, .pickBackgroundColor, .capture, .editPoint:
             return nil
         }
     }
@@ -91,6 +104,11 @@ enum ToolMode: CaseIterable {
         case .traceDigitize:       return "自动跟踪"
         case .capture:             return "手工取点"
         case .eraser:              return "擦除"
+        // The fallback only. A stroke that actually did something names what it
+        // did — 移动点 / 插入点 / 删除点 — because 「撤销 编辑点」 leaves the user
+        // guessing which of the three is about to be taken back, and the menu
+        // reads this name back to them.
+        case .editPoint:           return "编辑点"
         case .redigitize:          return "重新选点"
         case .reorder:             return "点重排"
         }
@@ -363,6 +381,11 @@ final class CanvasView: NSView {
         reorder = nil
         reorderLastCentre = nil
         dragRect = nil
+        // An undone edit may have deleted the point the selection was pointing
+        // at, so the index is no longer known to be in range.
+        selectedPointStoredIndex = nil
+        draggingPointStoredIndex = nil
+        hoveredEditTarget = nil
         refreshMasks()
         needsDisplay = true
         delegate?.canvasDidChangeState(self)
@@ -419,6 +442,14 @@ final class CanvasView: NSView {
             // reloading it when the brush comes back.
             reorder = nil
             reorderLastCentre = nil
+            // The point-editing selection goes with it. It is a handle on a
+            // marker, and the tools that act on markers are all elsewhere; a ring
+            // left drawn around a point no tool is pointing at reads as a
+            // selection that will do something if you press, and it will not.
+            hoveredEditTarget = nil
+            draggingPointStoredIndex = nil
+            selectedPointStoredIndex = nil
+            pendingEditLabel = nil
             if !tool.tracksPointer { window?.acceptsMouseMovedEvents = false }
             needsDisplay = true
             window?.invalidateCursorRects(for: self)
@@ -587,6 +618,26 @@ final class CanvasView: NSView {
     /// Where the pointer is, in image space, while a ring-drawing tool is active.
     private var hoverPoint: PixelPoint?
 
+    // MARK: - 点编辑 scratch (FR-6.4)
+
+    /// What a press at the pointer would do — the marker it would grab, or the
+    /// spot on the polyline where it would insert one. Nil means the press would
+    /// land on nothing and clear the selection.
+    ///
+    /// One value rather than two, because the drawn preview and the press have to
+    /// agree: a ring shown at one place while the click acted at another is worse
+    /// than no preview at all.
+    private var hoveredEditTarget: EditTarget?
+    /// The marker a press would move, or the one a press has just created.
+    private var draggingPointStoredIndex: Int?
+    /// The marker last touched. Drawn ringed so the ⌫ that deletes it has a
+    /// visible subject — 「删除选中的点」 would otherwise be a command with
+    /// nothing on screen saying which point is selected.
+    private var selectedPointStoredIndex: Int?
+    /// What the point-editing stroke turned out to be, for the undo entry's name.
+    /// Set on the press, consumed on the release.
+    private var pendingEditLabel: String?
+
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
 
@@ -726,6 +777,11 @@ final class CanvasView: NSView {
         self.buffer = decoded
         masks.removeAll()
         maskInputs.removeAll()
+        // Indices into curves that no longer exist.
+        hoveredEditTarget = nil
+        draggingPointStoredIndex = nil
+        selectedPointStoredIndex = nil
+        pendingEditLabel = nil
         return true
     }
 
@@ -1107,6 +1163,7 @@ final class CanvasView: NSView {
 
         drawCalibrationOverlay()
         drawCurves()
+        drawEditingOverlay()
         drawPendingScalePoints()
         drawDragRect()
         drawToolRing()
@@ -1499,6 +1556,50 @@ final class CanvasView: NSView {
         drawSequenceNumbers(showsProgress ? Array(view[0..<sweptCount]) : view, color: color)
     }
 
+    /// The 点编辑 overlay: the marker under the pointer, the spot a click would
+    /// insert at, and the selection.
+    ///
+    /// Drawn over the curves rather than as part of one, because it is about the
+    /// *tool*, not about the curve: two of the three things it shows do not exist
+    /// in the data at all — nothing is inserted until the press, and the pointer's
+    /// position is not part of any curve.
+    private func drawEditingOverlay() {
+        guard let line = state.activeLine else { return }
+
+        func ring(at v: CGPoint, radius: CGFloat, tint: NSColor, width: CGFloat) {
+            let path = NSBezierPath(ovalIn: NSRect(x: v.x - radius, y: v.y - radius,
+                                                   width: radius * 2, height: radius * 2))
+            NSColor.white.withAlphaComponent(0.9).setStroke()
+            path.lineWidth = width + 2.5
+            path.stroke()
+            tint.setStroke()
+            path.lineWidth = width
+            path.stroke()
+        }
+        func viewPoint(ofStored index: Int) -> CGPoint? {
+            guard index >= 0, index < line.points.count else { return nil }
+            return transform.viewPoint(fromImage: line.points[index])
+        }
+
+        if tool == .editPoint, let target = hoveredEditTarget {
+            switch target {
+            case .marker(_, let storedIndex):
+                if let v = viewPoint(ofStored: storedIndex) {
+                    ring(at: v, radius: 6.5, tint: .systemPurple, width: 1.5)
+                }
+            case .segment(_, let projection):
+                // An open ring, not a filled dot: what it shows is where a point
+                // *would* appear, and a dot would be indistinguishable from one
+                // that is already there.
+                ring(at: transform.viewPoint(fromImage: projection),
+                     radius: 4.5, tint: .systemPurple, width: 1.5)
+            }
+        }
+        if let index = selectedPointStoredIndex, let v = viewPoint(ofStored: index) {
+            ring(at: v, radius: 8, tint: .controlAccentColor, width: 2)
+        }
+    }
+
     /// A ringed marker for the first and last point of a curve.
     private func drawEndpoint(_ v: CGPoint, color: NSColor, radius: CGFloat, isStart: Bool) {
         let r = radius + 2.6
@@ -1740,6 +1841,13 @@ final class CanvasView: NSView {
             hoverPoint = imagePoint
             erase(at: imagePoint)
 
+        case .editPoint:
+            // Not gated on `isInsideImage`: the pointer is measured in view space,
+            // where a marker near the edge is still grabbable from just outside
+            // the bitmap. What the edit writes is clamped to the picture instead.
+            hoverPoint = imagePoint
+            beginEdit(at: viewPoint)
+
         case .redigitize:
             guard isInsideImage(imagePoint) else { return }
             hoverPoint = imagePoint
@@ -1774,7 +1882,17 @@ final class CanvasView: NSView {
     }
 
     override func mouseMoved(with event: NSEvent) {
-        let imagePoint = transform.imagePoint(fromView: convert(event.locationInWindow, from: nil))
+        let viewPoint = convert(event.locationInWindow, from: nil)
+        let imagePoint = transform.imagePoint(fromView: viewPoint)
+        if tool == .editPoint {
+            // Two things follow the pointer here — which marker is grabbable, and
+            // where a click would insert — and both are answered in view space, so
+            // this cannot go through the image-space early return below.
+            let changed = updateEditHover(at: viewPoint)
+            hoverPoint = imagePoint
+            if changed { needsDisplay = true }
+            return
+        }
         guard imagePoint != hoverPoint else { return }
         guard tool.tracksPointer else {
             // 浏览 and the other tools that paint nothing under the pointer: the
@@ -1791,7 +1909,9 @@ final class CanvasView: NSView {
     }
 
     override func mouseExited(with event: NSEvent) {
-        guard hoverPoint != nil else { return }
+        let hadEditHover = hoveredEditTarget != nil
+        hoveredEditTarget = nil
+        guard hoverPoint != nil || hadEditHover else { return }
         hoverPoint = nil
         needsDisplay = true
     }
@@ -1821,6 +1941,10 @@ final class CanvasView: NSView {
             hoverPoint = transform.imagePoint(fromView: viewPoint)
             erase(at: transform.imagePoint(fromView: viewPoint))
             needsDisplay = true
+
+        case .editPoint:
+            hoverPoint = transform.imagePoint(fromView: viewPoint)
+            dragEditedPoint(to: viewPoint)
 
         case .reorder:
             let p = transform.imagePoint(fromView: viewPoint)
@@ -1863,6 +1987,11 @@ final class CanvasView: NSView {
                 redigitize(in: normalized)
             }
 
+        case .editPoint:
+            // The marker stays selected, so ⌫ right after a readjustment deletes
+            // the one that was just placed rather than nothing at all.
+            draggingPointStoredIndex = nil
+
         case .reorder:
             // The stroke ends; the sweep does not. The numbering is already in
             // the model, so the next press carries on from it and the user can
@@ -1881,7 +2010,14 @@ final class CanvasView: NSView {
         //
         // A press that changed nothing records nothing: a pan, a click on empty
         // space, the first three 标定 anchors, which live outside `ProjectState`.
-        endGesture(tool.undoActionName)
+        //
+        // The one tool that has three different actions names the one it took:
+        // 「撤销 移动点」 says what is about to be taken back, where the tool's own
+        // name would leave the user waiting to see. Cleared on every release so a
+        // lingering name cannot label the next tool's stroke.
+        let label = pendingEditLabel ?? tool.undoActionName
+        pendingEditLabel = nil
+        endGesture(label)
     }
 
     override func scrollWheel(with event: NSEvent) {
@@ -1907,6 +2043,10 @@ final class CanvasView: NSView {
         switch tool {
         case .browse:    cursor = .openHand
         case .eraser:    cursor = .disappearingItem
+        // A hand, pointing: the marker under it can be picked up. The eraser's
+        // disappearing-item cursor means "this is about to go", which is the
+        // opposite of what a press does here.
+        case .editPoint: cursor = .pointingHand
         case .redigitize: cursor = .crosshair
         case .setScale, .capture, .pickLineColor, .pickBackgroundColor:
             cursor = .crosshair
@@ -1928,6 +2068,16 @@ final class CanvasView: NSView {
         guard !event.modifierFlags.contains(.command),
               let key = event.charactersIgnoringModifiers?.lowercased() else {
             super.keyDown(with: event)
+            return
+        }
+        // ⌫ and forward-delete. By key code rather than by character: the two keys
+        // send DEL (0x7F) and F728, the second of which has no business being
+        // spelled out as a literal in a switch, and every Mac keyboard that has a
+        // forward-delete key sends 117 for it.
+        if tool == .editPoint, event.keyCode == 51 || event.keyCode == 117 {
+            if !deleteSelectedPoint() {
+                delegate?.canvas(self, didFailWith: "没有选中的数据点。先用「点编辑」点一下要删除的点。")
+            }
             return
         }
         switch key {
@@ -2025,6 +2175,273 @@ final class CanvasView: NSView {
             delegate?.canvasDidChangeState(self)
         }
         return removed
+    }
+
+    // MARK: - 点编辑 (FR-6.4)
+
+    /// How close the pointer must come to a marker to grab it, in **view points**.
+    ///
+    /// View points, not image pixels, because a marker is drawn at a fixed size on
+    /// screen: at 4× zoom ten image pixels is a quarter of a marker, and at 0.25×
+    /// it is four markers. Where the user is aiming has to be measured in the
+    /// space they are aiming in.
+    static let markerGrabTolerance: CGFloat = 10
+    /// How close it must come to the line between two markers to mean "insert
+    /// here". Tighter than the marker tolerance on purpose: a segment can be long,
+    /// and a generous radius would swallow the clicks aimed at the markers at its
+    /// two ends.
+    static let segmentGrabTolerance: CGFloat = 7
+
+    /// What a press at a given point would do.
+    private enum EditTarget: Equatable {
+        /// Grab this marker. `storedIndex` is where to write; `displayIndex` is
+        /// only what makes the drawing code able to talk about it in the same
+        /// vocabulary as the segment case.
+        case marker(displayIndex: Int, storedIndex: Int)
+        /// Drop a new point on the polyline here — `projection` is the spot, in
+        /// image space, and `displayIndex` is the earlier end of that segment as
+        /// drawn.
+        case segment(displayIndex: Int, projection: PixelPoint)
+    }
+
+    /// The single answer to "what would a press here do".
+    ///
+    /// One function for the press and the hover preview both, because the picture
+    /// must not promise a different action from the one the click takes.
+    ///
+    /// **Nearest feature wins.** The obvious rule — take a marker if one is in
+    /// reach, otherwise the line — is wrong at the default grid spacing, where
+    /// markers come out eight pixels apart: then *every* part of every segment is
+    /// within a marker's grab radius, and inserting into an area-digitised curve
+    /// would be impossible. That is precisely the curve this tool exists to add a
+    /// missing point to. A tie goes to the marker, which is the smaller target to
+    /// have been aiming at.
+    ///
+    /// Stored indices in this section, deliberately. On a curve ordered by x, or
+    /// one that has been swept, the marker drawn at position *k* is stored
+    /// somewhere else entirely, and a move written by displayed position would
+    /// shift a different point while looking exactly like it had worked. The
+    /// conversion happens here, once.
+    private func editTarget(nearViewPoint v: CGPoint) -> EditTarget? {
+        guard let line = state.activeLine, !line.points.isEmpty else { return nil }
+        let indices = line.orderedPointIndices
+        let view = line.orderedPoints.map { transform.viewPoint(fromImage: $0) }
+
+        var nearestMarker: (display: Int, stored: Int, distance: CGFloat)?
+        for display in view.indices {
+            let distance = hypot(v.x - view[display].x, v.y - view[display].y)
+            if nearestMarker == nil || distance < nearestMarker!.distance {
+                nearestMarker = (display, indices[display], distance)
+            }
+        }
+        if let marker = nearestMarker, marker.distance > Self.markerGrabTolerance {
+            nearestMarker = nil
+        }
+
+        var nearestSegment: (display: Int, foot: CGPoint, distance: CGFloat)?
+        if view.count >= 2 {
+            for index in 0..<(view.count - 1) {
+                let a = view[index], b = view[index + 1]
+                let vx = b.x - a.x, vy = b.y - a.y
+                let lengthSquared = vx * vx + vy * vy
+                // Two markers in the same place have no segment between them, and
+                // the projection below would divide by zero.
+                guard lengthSquared > 1e-9 else { continue }
+                let t = min(1, max(0, ((v.x - a.x) * vx + (v.y - a.y) * vy) / lengthSquared))
+                let foot = CGPoint(x: a.x + t * vx, y: a.y + t * vy)
+                let distance = hypot(v.x - foot.x, v.y - foot.y)
+                if nearestSegment == nil || distance < nearestSegment!.distance {
+                    nearestSegment = (index, foot, distance)
+                }
+            }
+        }
+        if let segment = nearestSegment, segment.distance > Self.segmentGrabTolerance {
+            nearestSegment = nil
+        }
+
+        switch (nearestMarker, nearestSegment) {
+        case (nil, nil):
+            return nil
+        case (let marker?, nil):
+            return .marker(displayIndex: marker.display, storedIndex: marker.stored)
+        case (nil, let segment?):
+            return .segment(displayIndex: segment.display,
+                            projection: transform.imagePoint(fromView: segment.foot))
+        case (let marker?, let segment?):
+            return marker.distance <= segment.distance
+                ? .marker(displayIndex: marker.display, storedIndex: marker.stored)
+                : .segment(displayIndex: segment.display,
+                           projection: transform.imagePoint(fromView: segment.foot))
+        }
+    }
+
+    /// Refreshes what the pointer is over. Reports whether the picture changed, so
+    /// the caller repaints only when it did.
+    @discardableResult
+    private func updateEditHover(at viewPoint: CGPoint) -> Bool {
+        let target = editTarget(nearViewPoint: viewPoint)
+        guard target != hoveredEditTarget else { return false }
+        hoveredEditTarget = target
+        return true
+    }
+
+    /// The press: grab the marker under the pointer, or drop a new one onto the
+    /// line under it.
+    ///
+    /// Opens no gesture of its own — the caller has already taken the snapshot —
+    /// so the press, the drag that may follow and the release are one undo step.
+    /// What that step is called is decided here too, because only this knows what
+    /// the press turned out to do.
+    private func beginEdit(at viewPoint: CGPoint) {
+        guard let id = state.activeLineID, let line = state.activeLine else {
+            delegate?.canvas(self, didFailWith: "没有可编辑的曲线。请先在右侧面板新增或选中一条。")
+            return
+        }
+        switch editTarget(nearViewPoint: viewPoint) {
+        case .marker(_, let storedIndex):
+            selectedPointStoredIndex = storedIndex
+            draggingPointStoredIndex = storedIndex
+            pendingEditLabel = "移动点"
+            needsDisplay = true
+
+        case .segment(let displayIndex, let projection):
+            guard let at = line.storedInsertionIndex(betweenDisplayIndex: displayIndex) else {
+                needsDisplay = true
+                return
+            }
+            guard state.insertPoint(of: id, at: at, point: clampedToImage(projection)) else {
+                needsDisplay = true
+                return
+            }
+            // The new marker is what the rest of the stroke drags, so a point can
+            // be dropped roughly and placed exactly in one gesture rather than two.
+            selectedPointStoredIndex = at
+            draggingPointStoredIndex = at
+            pendingEditLabel = "插入点"
+            needsDisplay = true
+            delegate?.canvasDidChangeState(self)
+
+        case nil:
+            // A press on nothing clears the selection, which is what clicking empty
+            // space does in every other tool.
+            selectedPointStoredIndex = nil
+            needsDisplay = true
+        }
+    }
+
+    /// Moves the grabbed marker to follow the pointer.
+    private func dragEditedPoint(to viewPoint: CGPoint) {
+        guard let id = state.activeLineID, let index = draggingPointStoredIndex else { return }
+        let target = clampedToImage(transform.imagePoint(fromView: viewPoint))
+        guard state.movePoint(of: id, at: index, to: target) else { return }
+        needsDisplay = true
+        delegate?.canvasDidChangeState(self)
+    }
+
+    /// Takes the selected marker out of the curve — the ⌫ half of the tool.
+    ///
+    /// Goes through `ProjectState.removePoint` for the reason that method
+    /// documents: deleting renumbers every index after it, and a 点重排 sequence
+    /// has to be dropped in the same breath or the next redraw rearranges the
+    /// curve against a record that no longer describes it.
+    ///
+    /// Records its own undo step, unlike the drag: a key press has no
+    /// press-and-release pair for `beginGesture` to bracket.
+    @discardableResult
+    func deleteSelectedPoint() -> Bool {
+        guard let id = state.activeLineID, let index = selectedPointStoredIndex else { return false }
+        var removed = false
+        perform("删除点") { project in
+            removed = project.removePoint(of: id, at: index) != nil
+        }
+        guard removed else { return false }
+        selectedPointStoredIndex = nil
+        hoveredEditTarget = nil
+        needsDisplay = true
+        delegate?.canvasDidChangeState(self)
+        return true
+    }
+
+    /// Keeps an edited marker on the picture.
+    ///
+    /// Not cosmetic. A point's justification is the pixel of ink it was measured
+    /// from; one dragged off the bitmap has no evidence under it while going on
+    /// exporting a number, and it could not be grabbed again to bring back.
+    private func clampedToImage(_ p: PixelPoint) -> PixelPoint {
+        guard let buffer else { return p }
+        return PixelPoint(x: min(max(p.x, 0), Double(buffer.width - 1)),
+                          y: min(max(p.y, 0), Double(buffer.height - 1)))
+    }
+
+    // MARK: - 单个点的坐标 (FR-7.2)
+
+    /// Sets one coordinate of a point, addressed by **displayed** position.
+    ///
+    /// A displayed index because that is what the side panel's table shows and the
+    /// panel is the caller. The conversion to a stored index happens here, once,
+    /// through `CurveLine.orderedPointIndices`; a panel that did that arithmetic
+    /// itself would, on a curve in X 升序, edit whichever point happens to sit at
+    /// that row's *storage* position.
+    ///
+    /// A typed value is in the chart's own numbers, so it goes through the
+    /// calibration to become a pixel — and **only the axis that changed** does.
+    /// A round trip through the mapping can shift the other coordinate in its last
+    /// bits, and an edit to x that quietly nudges y is a defect nobody would ever
+    /// track down.
+    ///
+    /// Returns whether the point actually moved.
+    @discardableResult
+    func setCoordinate(_ value: Double, of axis: PointCoordinate, atDisplayIndex displayIndex: Int) -> Bool {
+        guard let id = state.activeLineID, let line = state.activeLine,
+              displayIndex >= 0, displayIndex < line.points.count else { return false }
+        let storedIndex = line.orderedPointIndices[displayIndex]
+        var updated = line.points[storedIndex]
+        if let calibration = state.calibration {
+            do {
+                switch axis {
+                case .x: updated.x = try calibration.x.pixel(atValue: value)
+                case .y: updated.y = try calibration.y.pixel(atValue: value)
+                }
+            } catch {
+                // A log axis refuses zero and negatives; a degenerate one refuses
+                // everything. Refusing the edit is the honest answer — the
+                // alternative is a point at infinity.
+                return false
+            }
+        } else {
+            // No calibration, and the table is showing pixel coordinates, so the
+            // number typed is a pixel. Editing what is on screen is the only rule
+            // that never asks the user to do arithmetic in their head.
+            switch axis {
+            case .x: updated.x = value
+            case .y: updated.y = value
+            }
+        }
+        var changed = false
+        perform("修改坐标") { project in
+            changed = project.movePoint(of: id, at: storedIndex, to: updated)
+        }
+        guard changed else { return false }
+        needsDisplay = true
+        delegate?.canvasDidChangeState(self)
+        return true
+    }
+
+    /// Deletes a point, addressed by displayed position — the table's ⌫.
+    @discardableResult
+    func removePoint(atDisplayIndex displayIndex: Int) -> Bool {
+        guard let id = state.activeLineID, let line = state.activeLine,
+              displayIndex >= 0, displayIndex < line.points.count else { return false }
+        let storedIndex = line.orderedPointIndices[displayIndex]
+        var removed = false
+        perform("删除点") { project in
+            removed = project.removePoint(of: id, at: storedIndex) != nil
+        }
+        guard removed else { return false }
+        selectedPointStoredIndex = nil
+        needsDisplay = true
+        delegate?.canvasDidChangeState(self)
+        return true
     }
 
     /// Removes the points inside `rect` and re-digitises that stretch.

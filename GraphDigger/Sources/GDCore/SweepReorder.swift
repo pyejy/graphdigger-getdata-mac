@@ -197,4 +197,32 @@ public struct SweepReorder: Equatable, Sendable {
     public func resolve(_ points: [PixelPoint]) -> [PixelPoint] {
         Self.resolve(points, sequence: sequence).points
     }
+
+    /// The same resolution expressed as **indices into the stored points**.
+    ///
+    /// `resolve` answers "what does the curve look like"; this answers "which
+    /// stored point is that", which is what an editor needs. Dragging a marker
+    /// has to write to the point the user grabbed, and on a curve whose order is
+    /// anything but 取点顺序 the displayed position and the stored index are two
+    /// different numbers — writing by displayed position would move whichever
+    /// point happens to sit at that index and leave the grabbed one where it was.
+    ///
+    /// Kept beside `resolve` and asserted equal to it in the tests
+    /// (`points[indices] == resolve(points)`), because two ways of computing one
+    /// order is exactly how the two drift apart.
+    public static func resolveIndices(pointCount: Int,
+                                      sequence: [Int]) -> (indices: [Int], sweptCount: Int) {
+        guard pointCount > 0 else { return ([], 0) }
+        guard !sequence.isEmpty else { return (Array(0..<pointCount), 0) }
+        var used = [Bool](repeating: false, count: pointCount)
+        var ordered: [Int] = []
+        ordered.reserveCapacity(pointCount)
+        for index in sequence where index >= 0 && index < pointCount && !used[index] {
+            used[index] = true
+            ordered.append(index)
+        }
+        let sweptCount = ordered.count
+        for index in 0..<pointCount where !used[index] { ordered.append(index) }
+        return (ordered, sweptCount)
+    }
 }

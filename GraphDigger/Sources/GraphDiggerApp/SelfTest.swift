@@ -730,6 +730,16 @@ enum SelfTest {
         let labels = theDataPlotLabelsAreReadable()
         check("数据视图刻度标签是圆整数,不会出现 0.6000000000000001", labels.passed, labels.detail)
 
+        // --- 点编辑与数据表 (FR-6.4 / FR-7.2)--------------------------------
+        let move = pointEditingMovesExactlyOneMarker()
+        check("点编辑:拖动只动那一个点,其余原样,一次手势记一步撤销", move.passed, move.detail)
+        let insert = pointEditingInsertsOnTheLineThenDeletes()
+        check("点编辑:在连线上点一下插入,新点落在该段两端之间,⌫ 删掉它", insert.passed, insert.detail)
+        let orderFree = pointEditingWritesTheDisplayedMarkerNotTheStoredIndex()
+        check("反转顺序下拖第一个标记,动的是存储里的最后一个点", orderFree.passed, orderFree.detail)
+        let table = thePointTableEditsTheDisplayedPoint()
+        check("数据表改的是显示序那一行的点,只改被改的那一轴,非法输入被拒", table.passed, table.detail)
+
         // --- 点重排 -----------------------------------------------------------
         // Same ring, same conversion as the eraser; what is different is that the
         // result is an *order*, so the checks are about what the brush's path
@@ -2782,6 +2792,252 @@ enum SelfTest {
                 + " · 不保存时问了 \(askedOnDiscard) 次 · 已替换=\(replaced)")
     }
 
+    // MARK: - 点编辑与数据表 (FR-6.4 / FR-7.2)
+
+    /// Press, drag and release, through the handlers the canvas is driven by.
+    ///
+    /// All three events: the edit lands on the press and the *step* is recorded on
+    /// the release, so a check that stopped after the drag would be inspecting a
+    /// gesture that never closed — and would pass against a canvas that recorded
+    /// nothing at all.
+    @discardableResult
+    private static func dragPoint(_ canvas: CanvasView,
+                                  from: PixelPoint, to: PixelPoint) -> Bool {
+        guard let down = dragEvent(canvas, .leftMouseDown, CGPoint(x: from.x, y: from.y)),
+              let moved = dragEvent(canvas, .leftMouseDragged, CGPoint(x: to.x, y: to.y)),
+              let up = dragEvent(canvas, .leftMouseUp, CGPoint(x: to.x, y: to.y))
+        else { return false }
+        canvas.mouseDown(with: down)
+        canvas.mouseDragged(with: moved)
+        canvas.mouseUp(with: up)
+        return true
+    }
+
+    /// Where an edit actually lands, given the canvas clamps to the picture.
+    ///
+    /// Computed here rather than hoped for: a target picked a few pixels inside
+    /// the image is inside, but the check should be about the edit and not about
+    /// the fixture having been lucky about its margins.
+    private static func clamped(_ p: PixelPoint, on canvas: CanvasView) -> PixelPoint {
+        guard let buffer = canvas.buffer else { return p }
+        return PixelPoint(x: min(max(p.x, 0), Double(buffer.width - 1)),
+                          y: min(max(p.y, 0), Double(buffer.height - 1)))
+    }
+
+    /// Dragging a marker moves that point and nothing else.
+    ///
+    /// Three claims in one pass, each a different way the tool could be wrong: the
+    /// grabbed point is the one that moves, the curve still has the same number of
+    /// points, and the whole stroke is **one** undo step named after what it did.
+    private static func pointEditingMovesExactlyOneMarker() -> (passed: Bool, detail: String) {
+        guard let probe = singleCurveCanvas() else { return (false, "无法构建画布") }
+        let canvas = probe.canvas
+        canvas.tool = .editPoint
+        canvas.selectLine(id: probe.id)
+        guard let before = canvas.state.lines.first(where: { $0.id == probe.id })?.points,
+              before.count >= 8 else { return (false, "固定装置的点太少") }
+
+        // From the middle, so "the neighbours did not move" says something: a
+        // check that grabbed the first point could not tell a correct drag from
+        // one that shifted the whole array.
+        let index = before.count / 2
+        let grabbed = before[index]
+        let target = clamped(PixelPoint(x: grabbed.x + 15, y: grabbed.y - 11), on: canvas)
+        guard target != grabbed else { return (false, "固定装置太小,移动不出画面") }
+
+        guard dragPoint(canvas, from: grabbed, to: target),
+              let after = canvas.state.lines.first(where: { $0.id == probe.id })?.points else {
+            return (false, "构造不出拖拽事件")
+        }
+        let movedTheRightOne = after[index] == target
+        var othersIntact = true
+        for i in before.indices where i != index && before[i] != after[i] { othersIntact = false }
+        let sameCount = after.count == before.count
+        let label = canvas.undoLabel
+        let undone = canvas.undo()
+        let restored = canvas.state.lines.first(where: { $0.id == probe.id })?.points == before
+
+        let passed = movedTheRightOne && othersIntact && sameCount
+            && label == "移动点" && undone == "移动点" && restored
+        return (passed, passed
+            ? "第 \(index + 1) 个点移到 (\(Int(target.x)),\(Int(target.y))) · 其余 \(before.count - 1) 个未动"
+                + " · 点数不变 · 一步撤销「移动点」且能还原"
+            : "移动到位=\(movedTheRightOne) 其余未动=\(othersIntact) 点数不变=\(sameCount)"
+                + " 标签=\(label ?? "无") 撤销=\(undone ?? "无") 还原=\(restored)")
+    }
+
+    /// A click on the line between two markers inserts one there; ⌫ takes it back.
+    ///
+    /// The point of the check is where the new point *ends up in the order*: a
+    /// curve's polyline is what its sequence says, so a point inserted at the
+    /// wrong end would look correct on screen — it is at the right coordinates —
+    /// and draw a line right across the chart on the next redraw.
+    private static func pointEditingInsertsOnTheLineThenDeletes() -> (passed: Bool, detail: String) {
+        guard let probe = singleCurveCanvas() else { return (false, "无法构建画布") }
+        let canvas = probe.canvas
+        canvas.tool = .editPoint
+        canvas.selectLine(id: probe.id)
+        guard let before = canvas.state.lines.first(where: { $0.id == probe.id })?.points,
+              before.count >= 8 else { return (false, "固定装置的点太少") }
+
+        // The midpoint of a segment: on the chord by construction, so its distance
+        // to the line is zero while its distance to either end is half a spacing —
+        // which is the region the insert gesture owns now that the nearest feature
+        // wins. (Under a marker-first rule this click would have grabbed a marker,
+        // and inserting into an area-digitised curve would be impossible.)
+        let index = before.count / 2
+        let a = before[index], b = before[index + 1]
+        let midpoint = PixelPoint(x: (a.x + b.x) / 2, y: (a.y + b.y) / 2)
+        guard click(at: midpoint, on: canvas),
+              let inserted = canvas.state.lines.first(where: { $0.id == probe.id })?.points else {
+            return (false, "点不下去")
+        }
+        guard inserted.count == before.count + 1 else {
+            return (false, "点数没有增加:\(before.count) → \(inserted.count)(点到的可能是标记而不是连线)")
+        }
+        guard let position = inserted.firstIndex(where: { !before.contains($0) }) else {
+            return (false, "找不到新插入的点")
+        }
+        let insertLabel = canvas.undoLabel
+        let between = position > 0 && position + 1 < inserted.count
+            && inserted[position - 1] == a && inserted[position + 1] == b
+
+        // ⌫ on the point that was just placed. Through the canvas' own command —
+        // the key itself is delivered by AppKit and cannot be synthesised here, and
+        // what is being checked is what the key does, not that it is bound.
+        let deleted = canvas.deleteSelectedPoint()
+        let afterDelete = canvas.state.lines.first(where: { $0.id == probe.id })?.points
+        let deleteLabel = canvas.undoLabel
+        let goneAgain = afterDelete == before
+        let undone = canvas.undo()
+
+        let passed = between && insertLabel == "插入点" && deleted && goneAgain
+            && deleteLabel == "删除点" && undone == "删除点"
+        return (passed, passed
+            ? "新点插在第 \(position + 1) 位,两邻正是 (\(Int(a.x)),\(Int(a.y))) 与 (\(Int(b.x)),\(Int(b.y)))"
+                + " · 撤销名「插入点」 · ⌫ 删掉后曲线与原来逐点相同 · 撤销名「删除点」"
+            : "落在两端之间=\(between)(位置 \(position)) 插入标签=\(insertLabel ?? "无")"
+                + " 删除=\(deleted) 复原=\(goneAgain) 删除标签=\(deleteLabel ?? "无") 撤销=\(undone ?? "无")")
+    }
+
+    /// The bug this whole section is arranged around.
+    ///
+    /// On a reversed curve the first marker on screen is the **last** point in
+    /// storage. An editor that used the position it drew at as the index it wrote
+    /// to would move the point at the other end — and the drag would look like it
+    /// had worked, because a marker did move, just not the one under the cursor.
+    /// Nothing on screen distinguishes the two outcomes except *which* marker
+    /// travelled, which is exactly what is asserted here.
+    private static func pointEditingWritesTheDisplayedMarkerNotTheStoredIndex()
+        -> (passed: Bool, detail: String) {
+        guard let probe = singleCurveCanvas() else { return (false, "无法构建画布") }
+        let canvas = probe.canvas
+        canvas.selectLine(id: probe.id)
+        canvas.setOrder(.reversed, for: probe.id)
+        canvas.tool = .editPoint
+        guard let line = canvas.state.lines.first(where: { $0.id == probe.id }),
+              let displayedFirst = line.orderedPoints.first,
+              let storedFirst = line.points.first,
+              displayedFirst != storedFirst else { return (false, "固定装置首尾重合,验不出区别") }
+
+        let target = clamped(PixelPoint(x: displayedFirst.x + 13, y: displayedFirst.y + 9), on: canvas)
+        guard dragPoint(canvas, from: displayedFirst, to: target),
+              let after = canvas.state.lines.first(where: { $0.id == probe.id })?.points else {
+            return (false, "构造不出拖拽事件")
+        }
+        let storedLastMoved = after.last == target
+        let storedFirstIntact = after.first == storedFirst
+        let stillReversed = canvas.state.lines.first(where: { $0.id == probe.id })?.order == .reversed
+        let shownFirst = canvas.state.lines.first(where: { $0.id == probe.id })?.orderedPoints.first
+
+        let passed = storedLastMoved && storedFirstIntact && stillReversed && shownFirst == target
+        return (passed, passed
+            ? "屏幕上第一个标记动的是存储里的末点 (\(Int(target.x)),\(Int(target.y))) · 存储首点未动 · 顺序仍是反转"
+            : "末点动=\(storedLastMoved) 首点未动=\(storedFirstIntact) 顺序保持=\(stillReversed)"
+                + " 显示首点=\(String(describing: shownFirst))")
+    }
+
+    /// The data table, on a calibrated curve — FR-7.2.
+    ///
+    /// Five claims, each a way it could be wrong: a typed number becomes the
+    /// chart value under the calibration, the **other** coordinate does not shift
+    /// (only the edited axis goes through the mapping), a row addresses the marker
+    /// the table is *showing* rather than the one at that storage position, text
+    /// that is not a number is refused, and a row that is not there is refused.
+    private static func thePointTableEditsTheDisplayedPoint() -> (passed: Bool, detail: String) {
+        guard let probe = singleCurveCanvas() else { return (false, "无法构建画布") }
+        let canvas = probe.canvas
+        canvas.selectLine(id: probe.id)
+        canvas.applyCalibration(anchors: CalibrationAnchors(xStart: PixelPoint(x: 100, y: 560),
+                                                           xEnd: PixelPoint(x: 800, y: 560),
+                                                           yStart: PixelPoint(x: 100, y: 560),
+                                                           yEnd: PixelPoint(x: 100, y: 60)),
+                                xStartValue: 0, xEndValue: 10,
+                                yStartValue: 0, yEndValue: 5,
+                                xIsLogarithmic: false, yIsLogarithmic: false)
+        guard let calibration = canvas.state.calibration,
+              let points = canvas.state.lines.first(where: { $0.id == probe.id })?.orderedPoints,
+              points.count > 4 else { return (false, "标定或曲线没建起来") }
+
+        let panel = SidebarView(frame: NSRect(x: 0, y: 0, width: 272, height: 480))
+        let wiring = PointEditProbe(canvas: canvas)
+        panel.delegate = wiring
+        panel.update(lines: canvas.state.lines, calibration: calibration, activeID: probe.id)
+
+        let row = 3
+        let before = points[row]
+        let beforeData = try? calibration.data(fromPixel: before)
+
+        guard let accepted = panel.commitPointValue(row: row, axis: .y, text: " 3.25 ") else {
+            return (false, "输入被拒(那是个合法的数)")
+        }
+        guard let edited = canvas.state.lines.first(where: { $0.id == probe.id })?.orderedPoints[row],
+              let editedData = try? calibration.data(fromPixel: edited) else {
+            return (false, "取不回改后的点")
+        }
+        let yIsTyped = abs(editedData.y - 3.25) < 1e-9
+        // The property that makes per-axis conversion worth the extra code: an edit
+        // to y must not move x by a bit, or a table session would slowly drift a
+        // curve that the user was only correcting vertically.
+        let xUntouched = edited.x == before.x
+
+        // And the row is a position on **screen**, not in storage. Reversed order
+        // puts the stored last point in row 0, so editing row 0 has to write the
+        // marker the table is showing — an implementation that used the row number
+        // as a storage index would edit the far end of the curve and leave the
+        // typed number nowhere on the chart.
+        canvas.setOrder(.reversed, for: probe.id)
+        panel.update(lines: canvas.state.lines, calibration: calibration, activeID: probe.id)
+        _ = panel.commitPointValue(row: 0, axis: .x, text: "7.5")
+        let reversedLine = canvas.state.lines.first(where: { $0.id == probe.id })
+        let lastEndTookIt = reversedLine?.orderedPoints.first.flatMap {
+            try? calibration.data(fromPixel: $0)
+        }.map { abs($0.x - 7.5) < 1e-9 } ?? false
+        let firstEndIntact = reversedLine?.orderedPoints.last == points.first
+
+        // Refusals. A comma is not accepted on purpose: it is a thousands
+        // separator as often as a decimal point, and 「1,000」 read as 1.000 would
+        // be wrong by a factor of a thousand with nothing on screen to show it.
+        // Read *here*, after the order change above: comparing against a value
+        // captured before it would be comparing two different rows.
+        let rowBeforeRefusal = canvas.state.lines.first(where: { $0.id == probe.id })?
+            .orderedPoints[row]
+        let refusedText = panel.commitPointValue(row: row, axis: .y, text: "3,5") == nil
+        let unchangedAfterRefusal = canvas.state.lines.first(where: { $0.id == probe.id })?
+            .orderedPoints[row] == rowBeforeRefusal
+        let refusedRow = panel.commitPointValue(row: 9_999, axis: .x, text: "1") == nil
+
+        let passed = yIsTyped && xUntouched && lastEndTookIt && firstEndIntact
+            && refusedText && unchangedAfterRefusal && refusedRow
+            && wiring.edits == 2 && accepted == 3.25
+        return (passed, passed
+            ? "输入 3.25 → Y=\(String(format: "%.2f", editedData.y)),X 像素未动(原 \(String(format: "%.1f", beforeData?.x ?? 0)) → \(String(format: "%.1f", editedData.x)))"
+                + " · 反转序下改第 1 行写的是末点 · 「3,5」被拒且值不变 · 越界行被拒"
+            : "Y 写入=\(yIsTyped) X 未动=\(xUntouched) 首行写末点=\(lastEndTookIt) 另一端未动=\(firstEndIntact)"
+                + " 文本被拒=\(refusedText) 拒后不变=\(unchangedAfterRefusal)"
+                + " 越界被拒=\(refusedRow) 委托次数=\(wiring.edits) 返回值=\(accepted)")
+    }
+
     // MARK: - 项目文件 (project files)
     //
     // The container's own encoding — the prologue, the offsets, which failure is
@@ -3268,6 +3524,7 @@ enum SelfTest {
             ("⌘R", "Re-digitize (重新选点)"),
             ("⌘B", "Reorder Points by Sweep (点重排)"),
             ("⌘E", "Eraser (橡皮擦)"),
+            ("⇧⌘E", "Edit Point (点编辑)"),
             ("⌘D", "Digitize Area (区域取点)"),
             ("⌘0", "Browse (浏览)"),
         ]
@@ -4090,6 +4347,39 @@ private final class SelectionLoopProbe: SidebarViewDelegate {
     func sidebar(_ s: SidebarView, didRenameLine id: UUID, to name: String) {}
     func sidebarDidRequestAddLine(_ s: SidebarView) {}
     func sidebar(_ s: SidebarView, didRequestRemoveLine id: UUID) {}
+    // Not exercised here: this probe exists to count selection round trips, and
+    // the table's editing path is driven directly in the selftest's own check.
+    func sidebar(_ s: SidebarView, didEditPointAt row: Int,
+                 axis: PointCoordinate, to value: Double) -> Bool { false }
+    func sidebar(_ s: SidebarView, didRequestRemovePointAt row: Int) {}
+}
+
+/// A stand-in for the window's panel wiring: it answers a typed coordinate the
+/// way the app does — hand it to the canvas, report whether it was taken — and
+/// counts the calls, so a panel that parsed the text but never asked anybody is
+/// distinguishable from one that did.
+private final class PointEditProbe: SidebarViewDelegate {
+    private let canvas: CanvasView
+    private(set) var edits = 0
+
+    init(canvas: CanvasView) { self.canvas = canvas }
+
+    func sidebar(_ sidebar: SidebarView, didEditPointAt row: Int,
+                 axis: PointCoordinate, to value: Double) -> Bool {
+        edits += 1
+        return canvas.setCoordinate(value, of: axis, atDisplayIndex: row)
+    }
+
+    func sidebar(_ sidebar: SidebarView, didRequestRemovePointAt row: Int) {
+        _ = canvas.removePoint(atDisplayIndex: row)
+    }
+
+    func sidebar(_ sidebar: SidebarView, didSelectLine id: UUID) {}
+    func sidebar(_ sidebar: SidebarView, didSetOrder order: PointOrder, for id: UUID) {}
+    func sidebar(_ sidebar: SidebarView, didSetVisible visible: Bool, for id: UUID) {}
+    func sidebar(_ sidebar: SidebarView, didRenameLine id: UUID, to name: String) {}
+    func sidebarDidRequestAddLine(_ sidebar: SidebarView) {}
+    func sidebar(_ sidebar: SidebarView, didRequestRemoveLine id: UUID) {}
 }
 
     private static func yErrors(_ extracted: [PixelPoint], chart: SyntheticChart.Chart) -> [Double] {

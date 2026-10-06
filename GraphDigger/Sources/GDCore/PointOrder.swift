@@ -42,37 +42,52 @@ public enum PointOrder: String, CaseIterable, Codable, Sendable {
 
     /// Points in this order. Stable: equal keys keep their extraction order, so
     /// a column of points sharing an x does not get shuffled arbitrarily.
+    ///
+    /// Expressed through `applyIndices`, deliberately: the two must never
+    /// disagree, and the only way to guarantee that is to have one of them be a
+    /// lookup of the other. `GDCoreTests` asserts the relationship rather than
+    /// trusting it.
     public func apply(to points: [PixelPoint]) -> [PixelPoint] {
+        applyIndices(to: points).map { points[$0] }
+    }
+
+    /// The same order, as **indices into `points`** rather than as a copy.
+    ///
+    /// Needed by anything that *edits* the points rather than just drawing them.
+    /// A sorted or reversed order is a permutation, so on such a curve the
+    /// position a marker is drawn at and the index it is stored at are different
+    /// numbers; an editor that used one for the other would move the wrong point
+    /// and look like it had moved the right one.
+    public func applyIndices(to points: [PixelPoint]) -> [Int] {
         switch self {
         case .extraction:
-            return points
+            return Array(points.indices)
         case .reversed:
-            return points.reversed()
+            return Array(points.indices.reversed())
         case .ascendingX:
-            return Self.stableSort(points, by: { $0.x < $1.x })
+            return Self.stableSortedIndices(points, by: { $0.x < $1.x })
         case .descendingX:
-            return Self.stableSort(points, by: { $0.x > $1.x })
+            return Self.stableSortedIndices(points, by: { $0.x > $1.x })
         case .swept:
             // Deliberately the original order. The sweep's own sequence is not
             // part of the point set, so it cannot be applied from here — see the
             // note on the case. Falling back to the extraction order is the
             // honest answer rather than an empty or arbitrary one, and it is what
             // a curve with no sweep recorded should show.
-            return points
+            return Array(points.indices)
         }
     }
 
     /// `Array.sorted(by:)` makes no stability promise, so ties are broken by
     /// position explicitly.
-    private static func stableSort(_ points: [PixelPoint],
-                                   by precedes: (PixelPoint, PixelPoint) -> Bool) -> [PixelPoint] {
-        points.enumerated()
+    private static func stableSortedIndices(_ points: [PixelPoint],
+                                            by precedes: (PixelPoint, PixelPoint) -> Bool) -> [Int] {
+        points.indices
             .sorted { a, b in
-                if precedes(a.element, b.element) { return true }
-                if precedes(b.element, a.element) { return false }
-                return a.offset < b.offset
+                if precedes(points[a], points[b]) { return true }
+                if precedes(points[b], points[a]) { return false }
+                return a < b
             }
-            .map(\.element)
     }
 }
 

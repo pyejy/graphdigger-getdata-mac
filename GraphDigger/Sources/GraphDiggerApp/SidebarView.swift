@@ -9,6 +9,41 @@ protocol SidebarViewDelegate: AnyObject {
     func sidebar(_ sidebar: SidebarView, didRenameLine id: UUID, to name: String)
     func sidebarDidRequestAddLine(_ sidebar: SidebarView)
     func sidebar(_ sidebar: SidebarView, didRequestRemoveLine id: UUID)
+
+    /// A number typed into the point table — FR-7.2.
+    ///
+    /// Returns whether it was taken. The panel puts the previous number back when
+    /// it was not, because a cell that goes on showing a value the model refused
+    /// is worse than the edit failing: the user reads it as saved.
+    ///
+    /// `row` is a position in the table, which is the **displayed** order. Turning
+    /// that into a stored index is the canvas' job —
+    /// `CanvasView.setCoordinate(_:of:atDisplayIndex:)` — and deliberately not the
+    /// panel's, which does not know that the two differ.
+    func sidebar(_ sidebar: SidebarView, didEditPointAt row: Int,
+                 axis: PointCoordinate, to value: Double) -> Bool
+
+    /// The ⌫ key in the point table.
+    func sidebar(_ sidebar: SidebarView, didRequestRemovePointAt row: Int)
+}
+
+/// The data table, with one extra key: ⌫ deletes the selected row's point.
+///
+/// Caught in the table rather than in a menu because that is where the focus is
+/// once the user has started working in the list — and a menu shortcut cannot
+/// reach it, because a table's field editor takes the keystroke first. While a
+/// cell *is* being edited the field editor wins, which is what makes ⌫ mean "one
+/// character" inside a number and "this point" outside one.
+private final class PointTableView: NSTableView {
+    var onDeleteRow: ((Int) -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        if (event.keyCode == 51 || event.keyCode == 117), selectedRow >= 0 {
+            onDeleteRow?(selectedRow)
+            return
+        }
+        super.keyDown(with: event)
+    }
 }
 
 private final class PassthroughLabel: NSTextField {
@@ -41,7 +76,7 @@ final class SidebarView: NSView {
     private var isSyncingSelection = false
 
     private let curveTable = NSTableView()
-    private let pointTable = NSTableView()
+    private let pointTable = PointTableView()
     private var orderPopUp: NSPopUpButton!
     private var orderHint: PassthroughLabel!
     private var emptyLabel: PassthroughLabel!
@@ -178,6 +213,11 @@ final class SidebarView: NSView {
         pointTable.intercellSpacing = NSSize(width: 0, height: 0)
         pointTable.dataSource = self
         pointTable.delegate = self
+        pointTable.toolTip = "双击 X 或 Y 单元格可直接改数值;⌫ 删除选中的点"
+        pointTable.onDeleteRow = { [weak self] row in
+            guard let self else { return }
+            self.delegate?.sidebar(self, didRequestRemovePointAt: row)
+        }
         let titles = ["#", "X", "Y"]
         let widths: [CGFloat] = [36, 0, 0]
         for (index, identifier) in Self.pointColumns.enumerated() {
@@ -512,6 +552,14 @@ extension SidebarView: NSTableViewDelegate {
 
     // MARK: Point row
 
+    /// One row of the point table: the number in a label, the two coordinates in
+    /// editable fields.
+    ///
+    /// The fields are what make the table worth more than a readout — it is the
+    /// only place in the app where a coordinate can be made *exact*, because a
+    /// marker on screen can be aimed at but never typed at. Fixing one digit of a
+    /// mis-read axis value is a two-second job here and a blind nudge of a mouse
+    /// anywhere else.
     private func pointCell(column: NSTableColumn?, row: Int) -> NSView? {
         guard let points = activeLinePoints, row < points.count else { return nil }
         let identifier = column?.identifier.rawValue ?? "x"
@@ -519,16 +567,66 @@ extension SidebarView: NSTableViewDelegate {
         // In a view-based table the cell view is handed the whole cell rect, so
         // the text has to inset itself or it sits on the column divider.
         let cell = NSView(frame: NSRect(x: 0, y: 0, width: width, height: pointTable.rowHeight))
-        let label = PassthroughLabel(labelWithString: text(for: identifier, row: row, points: points))
-        label.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-        label.textColor = identifier == "index" ? .secondaryLabelColor : .labelColor
-        label.alignment = identifier == "index" ? .right : .left
         let inset: CGFloat = identifier == "index" ? 5 : 7
-        label.frame = NSRect(x: inset, y: 1, width: max(20, width - inset * 2),
-                             height: pointTable.rowHeight - 3)
-        label.autoresizingMask = [.width]
-        cell.addSubview(label)
+        let frame = NSRect(x: inset, y: 1, width: max(20, width - inset * 2),
+                           height: pointTable.rowHeight - 3)
+        let value = text(for: identifier, row: row, points: points)
+
+        if identifier == "index" {
+            let label = PassthroughLabel(labelWithString: value)
+            label.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+            label.textColor = .secondaryLabelColor
+            label.alignment = .right
+            label.frame = frame
+            label.autoresizingMask = [.width]
+            cell.addSubview(label)
+            return cell
+        }
+
+        let field = NSTextField(string: value)
+        // The column identifier doubles as the axis, so a commit reads back which
+        // of the two numbers is being set without a second lookup table that could
+        // disagree with the columns.
+        field.identifier = NSUserInterfaceItemIdentifier(identifier)
+        field.isEditable = true
+        field.isBordered = false
+        field.drawsBackground = false
+        field.focusRingType = .none
+        field.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        field.delegate = self
+        field.frame = frame
+        field.autoresizingMask = [.width]
+        cell.addSubview(field)
         return cell
+    }
+
+    /// The commit path, split out so it can be driven without a field editor.
+    ///
+    /// The real route is `controlTextDidEndEditing`, which needs focus and a
+    /// keystroke to fire and therefore cannot be reached head-lessly. Returns the
+    /// value that was accepted, or nil when the text was refused — which is what a
+    /// test needs to see, and what tells the caller to put the old number back.
+    @discardableResult
+    func commitPointValue(row: Int, axis: PointCoordinate, text: String) -> Double? {
+        guard row >= 0, row < (activeLinePoints?.count ?? 0) else { return nil }
+        // `Double` and not a locale-aware parse, deliberately. A comma is a
+        // thousands separator as often as it is a decimal point, and reading
+        // 「1,000」 as 1.000 would be wrong by a factor of a thousand with nothing
+        // on screen to show it. Text the parser will not take is refused, and the
+        // old number comes back — a visible outcome.
+        guard let value = Double(text.trimmingCharacters(in: .whitespaces)) else { return nil }
+        guard delegate?.sidebar(self, didEditPointAt: row, axis: axis, to: value) == true else {
+            return nil
+        }
+        // Reformatted to the model's own rendering — 「1e2」 becomes 100.000000, and
+        // a number typed with stray spaces loses them. Deferred by one turn of the
+        // run loop because this runs from inside `controlTextDidEndEditing` and
+        // would otherwise recreate the very cell that is still unwinding; by the
+        // time the block runs the field editor has let go of it.
+        DispatchQueue.main.async { [weak self] in
+            self?.restorePointCell(row: row, axis: axis)
+        }
+        return value
     }
 
     private func text(for identifier: String, row: Int, points: [PixelPoint]) -> String {
@@ -547,6 +645,19 @@ extension SidebarView: NSTableViewDelegate {
         }
     }
 
+    /// Reloads one cell, so a refused edit stops showing the refused number.
+    ///
+    /// One cell rather than the table: a rejection is a local event, and a full
+    /// reload would throw away the scroll position and the row selection the user
+    /// is in the middle of working with.
+    private func restorePointCell(row: Int, axis: PointCoordinate) {
+        guard let column = pointTable.tableColumns.firstIndex(where: {
+            $0.identifier.rawValue == axis.rawValue
+        }) else { return }
+        pointTable.reloadData(forRowIndexes: IndexSet(integer: row),
+                              columnIndexes: IndexSet(integer: column))
+    }
+
     /// Six significant-ish digits, switching to exponent form at the extremes so
     /// a log axis' small values stay readable rather than printing as 0.000000.
     private static func number(_ value: Double) -> String {
@@ -554,6 +665,22 @@ extension SidebarView: NSTableViewDelegate {
         let magnitude = abs(value)
         if magnitude >= 1e6 || magnitude < 1e-4 { return String(format: "%.4e", value) }
         return String(format: "%.6f", value)
+    }
+}
+
+extension SidebarView: NSTextFieldDelegate {
+    /// A typed coordinate, committed. Fires on Return, on Tab and on clicking
+    /// away, which between them are every way a user leaves a cell — so there is
+    /// no keystroke that loses an edit rather than taking it.
+    func controlTextDidEndEditing(_ notification: Notification) {
+        guard let field = notification.object as? NSTextField,
+              let identifier = field.identifier?.rawValue,
+              let axis = PointCoordinate(rawValue: identifier) else { return }
+        let row = pointTable.row(for: field)
+        guard row >= 0 else { return }
+        if commitPointValue(row: row, axis: axis, text: field.stringValue) == nil {
+            restorePointCell(row: row, axis: axis)
+        }
     }
 }
 

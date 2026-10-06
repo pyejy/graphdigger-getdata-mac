@@ -336,6 +336,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         addTool("Auto Trace Line (自动跟踪)", "traceDigitize", "t")
         addTool("Point Capture (手工取点)", "capture", "p")
         addTool("Eraser (橡皮擦)", "eraser", "e")
+        // ⇧⌘E, one modifier over the eraser's ⌘E: this is the same job at a finer
+        // grain — 橡皮擦 acts on everything inside a ring, 点编辑 on the one marker
+        // under the pointer — so the letter belongs to the pair and the modifier
+        // says which of the two. It is also the only repair tool here that can
+        // *add* a point, which the eraser and 重新选点 both cannot.
+        addTool("Edit Point (点编辑)", "editPoint", "e", [.command, .shift])
         addTool("Re-digitize (重新选点)", "redigitize", "r")
         opsMenu.addItem(.separator())
         opsMenu.addItem(withTitle: "Add Curve (新增曲线)",
@@ -874,6 +880,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case "traceDigitize":       canvas.tool = .traceDigitize
         case "capture":             canvas.tool = .capture
         case "eraser":              canvas.tool = .eraser
+        case "editPoint":           canvas.tool = .editPoint
         case "redigitize":          canvas.tool = .redigitize
         case "reorder":             canvas.tool = .reorder
         default:                    canvas.tool = .browse
@@ -1097,7 +1104,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Rebuilds the toolbar's step prompt, the status line and the data panel
     /// from current state. Every mutation path funnels through here, so the
     /// three views can never disagree about what the project currently contains.
-    private func refreshUI(_ extra: String? = nil) {
+    ///
+    /// - Parameter reloadingPanel: false for the two commands that are driven from
+    ///   *inside* the point table. An edit commits from
+    ///   `controlTextDidEndEditing`, and rebuilding the table from within that
+    ///   callback would tear down the cell whose field editor is still unwinding —
+    ///   besides throwing away the scroll position and row selection of the list
+    ///   the user is working in. The rest of the window still has to catch up, so
+    ///   only the panel is skipped; the status line and the title bar's unsaved
+    ///   dot are not. The deletion path keeps the full reload, because there the
+    ///   row count changed and the table genuinely has a stale row.
+    private func refreshUI(_ extra: String? = nil, reloadingPanel: Bool = true) {
         let hasImage = canvas.buffer != nil
         let calibrated = canvas.state.calibration != nil
         let lines = canvas.state.lines
@@ -1115,9 +1132,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let parameter = canvas.tool.parameter
         bitmap.setParameter(parameter, value: parameter.map { canvas.value(of: $0) } ?? 0)
 
-        sidebar.update(lines: lines,
-                       calibration: canvas.state.calibration,
-                       activeID: canvas.state.activeLineID)
+        if reloadingPanel {
+            sidebar.update(lines: lines,
+                           calibration: canvas.state.calibration,
+                           activeID: canvas.state.activeLineID)
+        }
 
         // The step prompt walks the user through the pipeline in order, which is
         // what the menu bar could never convey. Readiness is judged per curve:
@@ -1406,5 +1425,34 @@ extension AppDelegate: SidebarViewDelegate {
     func sidebar(_ sidebar: SidebarView, didRequestRemoveLine id: UUID) {
         canvas.removeLine(id: id)
         refreshUI("已删除曲线")
+    }
+
+    /// A coordinate typed into the point table — FR-7.2.
+    ///
+    /// The value is in the chart's own numbers and the canvas turns it into a
+    /// pixel, because the canvas is what holds the calibration. A refusal is
+    /// answered in the status line rather than with an alert: the panel has
+    /// already put the old number back, so the user's next move is to try another
+    /// value, and a modal to dismiss in between would be in the way. What it does
+    /// need is the *reason*.
+    func sidebar(_ sidebar: SidebarView, didEditPointAt row: Int,
+                 axis: PointCoordinate, to value: Double) -> Bool {
+        guard canvas.setCoordinate(value, of: axis, atDisplayIndex: row) else {
+            refreshUI(canvas.state.calibration == nil
+                ? "第 \(row + 1) 个点的像素坐标取不到这个值,已还原"
+                : "该值在当前的 \(axis == .x ? "X" : "Y") 轴上没有意义(对数轴必须为正),已还原")
+            return false
+        }
+        // No panel reload: the number the user typed is already in the cell, and
+        // rebuilding the table would take them out of the row they are editing.
+        refreshUI("已把第 \(row + 1) 个点的 \(axis == .x ? "X" : "Y") 改为 \(value)",
+                  reloadingPanel: false)
+        return true
+    }
+
+    func sidebar(_ sidebar: SidebarView, didRequestRemovePointAt row: Int) {
+        refreshUI(canvas.removePoint(atDisplayIndex: row)
+            ? "已删除第 \(row + 1) 个点"
+            : "这一行没有对应的数据点")
     }
 }
