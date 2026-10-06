@@ -42,6 +42,15 @@ BUNDLE_ID="com.example.graphdigger"
 EXECUTABLE_NAME="GraphDigger"
 ARCHS=(arm64 x86_64)
 
+# The version the bundle reports, in one place. Bump it with the release tag.
+#
+# It is not decoration: `ProjectHeader.appVersion` writes it into every saved
+# project, and that field is the first thing wanted when a file misbehaves — so
+# a bundle that keeps claiming an old number makes the one record that is
+# supposed to identify the build useless. It sat at 0.1.0 across two releases
+# before this line existed, which is how the problem went unnoticed.
+VERSION="0.3.0"
+
 # The project file type, read out of the source rather than typed again here.
 #
 # The identifier and the extension each appear twice: once in
@@ -140,8 +149,8 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
     <key>CFBundleName</key>                  <string>$APP_NAME</string>
     <key>CFBundleDisplayName</key>           <string>$APP_NAME</string>
     <key>CFBundlePackageType</key>           <string>APPL</string>
-    <key>CFBundleShortVersionString</key>    <string>0.1.0</string>
-    <key>CFBundleVersion</key>               <string>1</string>
+    <key>CFBundleShortVersionString</key>    <string>$VERSION</string>
+    <key>CFBundleVersion</key>               <string>$VERSION</string>
     <key>LSMinimumSystemVersion</key>        <string>$DECLARED_TARGET</string>
     <key>NSHighResolutionCapable</key>       <true/>
     <key>NSPrincipalClass</key>              <string>NSApplication</string>

@@ -3,3 +3,7 @@
 
 # 本机的 Claude Code 权限设置,不属于项目内容
 .claude/settings.local.json
+
+# SwiftPM 的产物目录。真正的包在 GraphDigger/ 里(它自己也有这条);
+# 这里再写一条是因为在外层目录误跑 swift build 会留下一个空的 .build 脚手架。
+.build/
