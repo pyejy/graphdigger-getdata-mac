@@ -137,6 +137,15 @@ rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
 cp "$EXECUTABLE_PATH" "$APP_BUNDLE/Contents/MacOS/$EXECUTABLE_NAME"
 
+# The app icon, generated from scripts/make_icon.swift rather than checked in as
+# a binary asset — the script is the source of truth, so the icns is rebuilt
+# here whenever the app is. `iconutil` needs the iconset PNGs on disk.
+echo "==> Building the app icon"
+ICONSET="$REPO_ROOT/.build/AppIcon.iconset"
+rm -rf "$ICONSET"
+swift "$REPO_ROOT/scripts/make_icon.swift" "$ICONSET" >/dev/null
+iconutil -c icns "$ICONSET" -o "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
+
 cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -144,6 +153,7 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
 <dict>
     <key>CFBundleDevelopmentRegion</key>     <string>en</string>
     <key>CFBundleExecutable</key>            <string>$EXECUTABLE_NAME</string>
+    <key>CFBundleIconFile</key>              <string>AppIcon</string>
     <key>CFBundleIdentifier</key>            <string>$BUNDLE_ID</string>
     <key>CFBundleInfoDictionaryVersion</key> <string>6.0</string>
     <key>CFBundleName</key>                  <string>$APP_NAME</string>
