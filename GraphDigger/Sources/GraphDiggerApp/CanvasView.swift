@@ -1059,6 +1059,18 @@ final class CanvasView: NSView {
 
     // MARK: - Drawing
 
+    /// Whether the scanned picture is drawn under the extracted points — FR-1.3.
+    ///
+    /// View state, not document state: it is a way of *looking* at the work, like
+    /// the zoom, so it goes in neither the project file nor the undo history.
+    ///
+    /// Hiding the picture must disable nothing. Every tool reads `buffer`, which
+    /// is untouched — the mask, the hit-testing and the colour picker all keep
+    /// working. That is what makes the switch worth having: the question it
+    /// answers is "are these points on the curve?", and the curve is exactly what
+    /// is in the way of answering it.
+    var showsImage = true { didSet { needsDisplay = true } }
+
     override func draw(_ dirtyRect: NSRect) {
         NSColor.windowBackgroundColor.setFill()
         bounds.fill()
@@ -1074,11 +1086,24 @@ final class CanvasView: NSView {
                           height: Double(cg.height) * transform.scale)
         let target = NSRect(x: origin.x, y: origin.y, width: size.width, height: size.height)
 
-        NSGraphicsContext.current?.imageInterpolation =
-            transform.scale >= 3 ? .none : .high
-        NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
-            .draw(in: target, from: .zero, operation: .sourceOver,
-                  fraction: 1, respectFlipped: true, hints: nil)
+        if showsImage {
+            NSGraphicsContext.current?.imageInterpolation =
+                transform.scale >= 3 ? .none : .high
+            NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+                .draw(in: target, from: .zero, operation: .sourceOver,
+                      fraction: 1, respectFlipped: true, hints: nil)
+        } else {
+            // A blank sheet where the picture was, rather than nothing at all: the
+            // points keep the frame they were measured in instead of floating on
+            // the window background with no way to tell how far a stray point is
+            // from where it should be.
+            NSColor.textBackgroundColor.setFill()
+            target.fill()
+            NSColor.separatorColor.setStroke()
+            let outline = NSBezierPath(rect: target)
+            outline.lineWidth = 1
+            outline.stroke()
+        }
 
         drawCalibrationOverlay()
         drawCurves()

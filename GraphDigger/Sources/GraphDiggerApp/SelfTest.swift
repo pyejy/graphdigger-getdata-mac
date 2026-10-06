@@ -567,16 +567,30 @@ enum SelfTest {
         }
         check("多曲线精度 p95 ≤ 1%", perCurveAccurate)
 
-        // The exported file must keep the curves apart — three blocks, each
-        // carrying its own name.
+        // The exported file must be a table a parser can read: three curves is
+        // **one wide table**, not three named blocks. The layout changed on
+        // purpose — `#` is not part of CSV, so pandas rejects the file and Excel
+        // puts the names in column A as data, both silently.
         do {
             let csv = try Exporter.text(for: multiState.lines,
                                         calibration: multi.calibration, format: .csv)
-            let hasAllNames = multiState.lines.allSatisfy { csv.contains("# \($0.name)") }
-            check("多条曲线导出为独立数据块", hasAllNames,
-                  "\(multiState.lines.count) 个数据块")
+            let rows = csv.split(separator: "\n", omittingEmptySubsequences: false)
+                .map { $0.split(separator: ",", omittingEmptySubsequences: false) }
+            let width = multiState.lines.count * 2
+            let header = csv.split(separator: "\n").first.map(String.init) ?? ""
+            let wantHeader = (1...multiState.lines.count).flatMap { ["x\($0)", "y\($0)"] }
+                .joined(separator: ",")
+            // The trailing empty string is the newline at the end of the body, and
+            // splitting it gives no cells at all — so it is dropped, not counted.
+            let body = rows.dropLast()
+            let sameWidth = !body.isEmpty && body.allSatisfy { $0.count == width }
+            let noComments = !csv.contains("# ")
+            let ok = header == wantHeader && sameWidth && noComments
+            check("多条曲线导出成一张可解析的宽表(表头 x1,y1,…)", ok,
+                  ok ? "\(multiState.lines.count) 条曲线 · 每行 \(width) 列 · 无注释行"
+                     : "表头=\(header)(应为 \(wantHeader)) 等宽=\(sameWidth) 无注释=\(noComments)")
         } catch {
-            check("多条曲线导出为独立数据块", false, "抛出 \(error)")
+            check("多条曲线导出成一张可解析的宽表(表头 x1,y1,…)", false, "抛出 \(error)")
         }
 
         // --- point order -----------------------------------------------------
@@ -707,6 +721,14 @@ enum SelfTest {
         check("菜单快捷键无冲突,⌘S/⌘O 归保存与打开", menu.passed, menu.detail)
         let replaceGuard = openingAFileAsksBeforeDiscardingTheDocument()
         check("打开别的文件会先问,取消后原文档逐项保留、不保存才换", replaceGuard.passed, replaceGuard.detail)
+
+        // --- 两个「用来看」的视图(FR-1.3 / FR-7.1)-----------------------------
+        let hideImage = hidingTheImageTakesNothingAway()
+        check("隐藏原图只是不画它:文档不变、位图与掩膜都在,且仍能取点", hideImage.passed, hideImage.detail)
+        let dataView = theDataViewShowsAnOrderTheCanvasCannot()
+        check("同一批点在数据坐标里,列序折线明显长于行序(取歪看得出来)", dataView.passed, dataView.detail)
+        let labels = theDataPlotLabelsAreReadable()
+        check("数据视图刻度标签是圆整数,不会出现 0.6000000000000001", labels.passed, labels.detail)
 
         // --- 点重排 -----------------------------------------------------------
         // Same ring, same conversion as the eraser; what is different is that the
@@ -2560,6 +2582,116 @@ enum SelfTest {
             : "相位 \(phase)(不该为 0)· 全部落线=\(onTheLattice)")
     }
 
+    // MARK: - 两个「用来看」的视图 (FR-1.3 / FR-7.1)
+
+    /// Hiding the picture is a way of looking at the work, not a change to it.
+    ///
+    /// Three things have to hold, and each is a way the switch could have been
+    /// written wrongly: the document must not move (the flag is view state, so it
+    /// is in neither the project file nor the undo history), the bitmap the tools
+    /// sample must still be there, and a tool must still work while nothing is
+    /// drawn — because the entire value of the switch is judging the points with
+    /// the curve no longer underneath them.
+    private static func hidingTheImageTakesNothingAway() -> (passed: Bool, detail: String) {
+        guard let probe = singleCurveCanvas() else { return (false, "无法构建画布") }
+        let canvas = probe.canvas
+        let before = canvas.state
+        let pointsBefore = canvas.state.lines.first(where: { $0.id == probe.id })?.points.count ?? 0
+        let hadMask = canvas.activeMask != nil
+
+        canvas.showsImage = false
+        let stateUnchanged = canvas.state == before
+        let bufferKept = canvas.buffer?.width == probe.imageWidth
+        let maskKept = canvas.activeMask != nil
+
+        // 手工取点 needs no mask — it samples the picture directly — so a click
+        // while the image is hidden must still land on the curve.
+        canvas.tool = .capture
+        canvas.selectLine(id: probe.id)
+        let clicked = click(at: PixelPoint(x: 450, y: 320), on: canvas)
+        let pointsAfter = canvas.state.lines.first(where: { $0.id == probe.id })?.points.count ?? 0
+        let added = pointsAfter == pointsBefore + 1
+
+        canvas.showsImage = true
+        let restored = canvas.showsImage
+
+        let passed = hadMask && stateUnchanged && bufferKept && maskKept && clicked && added && restored
+        return (passed, passed
+            ? "隐藏时文档逐项未变 · 位图与掩膜都在 · 点击仍取到点(\(pointsBefore)→\(pointsAfter)) · 恢复显示正常"
+            : "原本有掩膜=\(hadMask) 文档未变=\(stateUnchanged) 位图在=\(bufferKept)"
+                + " 掩膜在=\(maskKept) 点击=\(clicked) 取到点=\(added)(\(pointsBefore)→\(pointsAfter))"
+                + " 恢复=\(restored)")
+    }
+
+    /// What the data view adds that the canvas cannot — FR-7.1, asserted as
+    /// *usefulness* rather than as "a window opened".
+    ///
+    /// The claim being tested is the reason the feature exists: a wrong order is
+    /// invisible on the scanned chart (the marker dots sit on the curve either
+    /// way) and obvious in data coordinates, where it becomes a polyline that
+    /// doubles back and forth. The shape is built by hand because the argument
+    /// needs one that is multi-valued in x — a chart that happened to be
+    /// single-valued would make the check pass for the wrong reason.
+    private static func theDataViewShowsAnOrderTheCanvasCannot() -> (passed: Bool, detail: String) {
+        let width = 80, height = 140
+        let curve: (Double) -> Double = { 40 + 20 * sin($0 / 9) }
+        var bits = [Bool](repeating: false, count: width * height)
+        for y in 0..<height {
+            for x in 0..<width where abs(Double(x) - curve(Double(y))) <= 2 {
+                bits[y * width + x] = true
+            }
+        }
+        let mask = ForegroundMask(width: width, height: height, bits: bits)
+        let rect = PixelRect(x0: 0, y0: 0, x1: width - 1, y1: height - 1)
+        let calibration = CalibrationMap(
+            x: AxisCalibration(pixelMin: 20, valueMin: 0, pixelMax: 60, valueMax: 10),
+            y: AxisCalibration(pixelMin: 139, valueMin: 0, pixelMax: 0, valueMax: 140))
+
+        /// Length of the polyline the data view would draw.
+        func dataPathLength(_ points: [PixelPoint]) -> Double {
+            let data = points.compactMap { try? calibration.data(fromPixel: $0) }
+            return zip(data, data.dropFirst()).reduce(0) { $0 + hypot($1.1.x - $1.0.x, $1.1.y - $1.0.y) }
+        }
+
+        let byColumn = AreaDigitizer.digitize(mask: mask, rect: rect, dx: 10, axis: .x)
+        let byRow = AreaDigitizer.digitize(mask: mask, rect: rect, dx: 10, axis: .y)
+        guard byColumn.count > 4, byRow.count > 4 else { return (false, "固定装置没取到点") }
+
+        let columnLength = dataPathLength(byColumn)
+        let rowLength = dataPathLength(byRow)
+        let ratio = rowLength > 0 ? columnLength / rowLength : 0
+        let passed = ratio > 2
+        return (passed, passed
+            ? "同一批点画在数据坐标里:列序折线 \(Int(columnLength)) 长,行序 \(Int(rowLength)) 长,差 "
+                + String(format: "%.1f", ratio) + " 倍 —— 取歪的顺序一眼能看出来"
+            : "列序 \(Int(columnLength)) 行序 \(Int(rowLength)),差 \(String(format: "%.2f", ratio)) 倍,不够明显")
+    }
+
+    /// The labels a reader gets. The values behind them are binary doubles, so
+    /// anything that printed them raw would label a tick "0.6000000000000001".
+    private static func theDataPlotLabelsAreReadable() -> (passed: Bool, detail: String) {
+        let cases: [(Double, String)] = [
+            (0, "0"),
+            (0.2 + 0.2 + 0.2, "0.6"),
+            (1, "1"),
+            (1000, "1000"),
+            (-2.5, "-2.5"),
+            (0.25, "0.25"),
+        ]
+        var wrong: [String] = []
+        for (value, want) in cases where DataPlotView.number(value) != want {
+            wrong.append("\(value) → \(DataPlotView.number(value))(应为 \(want))")
+        }
+        // Extreme magnitudes may go scientific; they must not go unreadable.
+        for value in [1e-7, 5e8] where DataPlotView.number(value).isEmpty {
+            wrong.append("\(value) 没有标签")
+        }
+        let passed = wrong.isEmpty
+        return (passed, passed
+            ? "6 个常见值都印成人的写法(含 0.2+0.2+0.2 → 0.6)"
+            : wrong.joined(separator: " · "))
+    }
+
     // MARK: - 换文件前的确认 (the replace guard)
 
     /// A chart image on disk, so the open path can be driven for real.
@@ -3124,7 +3256,10 @@ enum SelfTest {
             ("⌘O", "打开…"),
             ("⌘S", "保存项目"),
             ("⇧⌘S", "项目另存为…"),
-            ("⌘C", "Copy Data to Clipboard"),
+            ("⌘C", "Copy Data to Clipboard (复制全部曲线)"),
+            ("⌥⌘C", "Copy Current Curve (复制当前曲线)"),
+            ("⇧⌘I", "Show Image (显示原图)"),
+            ("⇧⌘D", "Data View (数据视图)"),
             ("⌘W", "Close Window"),
             ("⌘Z", "撤销"),
             ("⇧⌘Z", "重做"),
@@ -3141,6 +3276,32 @@ enum SelfTest {
             if owner != entry.command {
                 problems.append("\(entry.shortcut) 归了「\(owner ?? "空")」,应为 \(entry.command)")
             }
+        }
+
+        // The two export submenus must lead to *different* handlers. Wiring both
+        // to the general one would leave 「只导出当前曲线」 quietly exporting
+        // everything — which nobody notices until a figure comes back with five
+        // curves in it. Compared by selector name because the handlers are
+        // private to the delegate.
+        func exportItems(_ submenuTitle: String) -> [NSMenuItem] {
+            for item in main.items {
+                guard let sub = item.submenu,
+                      let carrier = sub.items.first(where: { $0.submenu?.title == submenuTitle })
+                else { continue }
+                return carrier.submenu?.items ?? []
+            }
+            return []
+        }
+        let allCurveItems = exportItems("Export Data")
+        let activeCurveItems = exportItems("Export Current Curve")
+        if allCurveItems.isEmpty || activeCurveItems.isEmpty {
+            problems.append("导出菜单没建出来")
+        }
+        for item in allCurveItems where item.action.map(NSStringFromSelector) ?? "" != "exportData:" {
+            problems.append("「\(item.title)」没接到导出全部曲线")
+        }
+        for item in activeCurveItems where item.action.map(NSStringFromSelector) ?? "" != "exportCurrentCurve:" {
+            problems.append("「\(item.title)」没接到只导出当前曲线")
         }
 
         // The other half: the case AppKit leaves alone. Measured by giving two

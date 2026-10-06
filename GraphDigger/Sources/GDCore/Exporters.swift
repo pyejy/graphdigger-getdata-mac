@@ -149,23 +149,70 @@ public enum Exporter {
         default:   separator = " "
         }
 
+        /// One curve's points as chart values, in display order.
+        func rows(_ line: CurveLine) throws -> [DataPoint] {
+            try line.orderedPoints.map { try value($0, calibration) }
+        }
+
+        // One curve: a plain two-column table.
+        if lines.count <= 1 {
+            var out = ""
+            if includeHeader { out += "x\(separator)y\n" }
+            for line in lines {
+                for data in try rows(line) {
+                    out += decimal(data.x) + separator + decimal(data.y) + "\n"
+                }
+            }
+            return out
+        }
+
+        // Several curves. A spreadsheet and a person want opposite things from a
+        // file of numbers, so they get different files rather than one
+        // compromise:
+        //
+        //   · CSV and TSV are read by pandas, Excel and plotting scripts, and
+        //     `# 名称` comment lines are **not part of the format** — pandas
+        //     raises, and Excel quietly puts them in column A as a data row. Both
+        //     are silently wrong, which is the worst kind. So the machine formats
+        //     get a **wide table**: one header row, one x/y pair per curve.
+        //   · TXT is read by eye, where a wide table with ragged rows is harder
+        //     to follow than labelled blocks. It keeps them.
+        //
+        // The wide table pads short curves with empty cells rather than stopping,
+        // because curves of a chart rarely have the same number of points and
+        // truncating would silently drop data from whichever is longest.
+        if format == .txt {
+            var out = ""
+            for (index, line) in lines.enumerated() {
+                if includeHeader { out += "# \(line.name)\n" }
+                for data in try rows(line) {
+                    out += decimal(data.x) + separator + decimal(data.y) + "\n"
+                }
+                if index < lines.count - 1 { out += "\n" }
+            }
+            return out
+        }
+
+        let columns = try lines.map { try rows($0) }
         var out = ""
-        for (index, line) in lines.enumerated() {
-            if includeHeader {
-                if lines.count > 1 {
-                    out += "# \(line.name)\n"
-                }
-                // A header row only makes sense for a single curve; with several
-                // curves the columns repeat and the name comment carries it.
-                if lines.count == 1 {
-                    out += "x\(separator)y\n"
+        if includeHeader {
+            out += (1...lines.count).flatMap { ["x\($0)", "y\($0)"] }
+                .joined(separator: separator) + "\n"
+        }
+        for row in 0..<(columns.map(\.count).max() ?? 0) {
+            var cells: [String] = []
+            for column in columns {
+                if row < column.count {
+                    cells.append(decimal(column[row].x))
+                    cells.append(decimal(column[row].y))
+                } else {
+                    // Stayed empty on purpose: a hole in the middle of a row would
+                    // shift every later column left and pair the wrong values.
+                    cells.append("")
+                    cells.append("")
                 }
             }
-            for point in line.orderedPoints {
-                let d = try value(point, calibration)
-                out += decimal(d.x) + separator + decimal(d.y) + "\n"
-            }
-            if index < lines.count - 1 { out += "\n" }
+            out += cells.joined(separator: separator) + "\n"
         }
         return out
     }

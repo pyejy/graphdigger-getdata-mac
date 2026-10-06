@@ -37,9 +37,58 @@ final class ExporterTests: XCTestCase {
         XCTAssertEqual(text.split(separator: "\n").count, 3)
     }
 
-    func testMultipleCurvesAreSeparatedAndNamed() throws {
+    /// Several curves into CSV: **one wide table**, not named blocks.
+    ///
+    /// This replaces a test that asserted the blocks (`# A` / `# B`). The layout
+    /// was changed on purpose, because a `#` comment line is not part of CSV:
+    /// pandas raises, and Excel puts it in column A as a data row — both
+    /// silently wrong. The names live in the header row now.
+    func testMultipleCurvesInCSVAreOneParseableTable() throws {
         let text = try Exporter.text(for: [makeLine("A"), makeLine("B")],
                                      calibration: calibration, format: .csv)
+        let rows = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        XCTAssertEqual(rows.first, "x1,y1,x2,y2")
+
+        // Every line the same width, and every cell of a *data* row a number.
+        // This is the property a parser depends on. The header is skipped on
+        // purpose — it is names, which is exactly what makes it a header.
+        for row in rows.dropFirst().dropLast() {
+            XCTAssertEqual(row.split(separator: ",", omittingEmptySubsequences: false).count, 4,
+                           "行不是四列: \(row)")
+            XCTAssertFalse(row.hasPrefix("#"), "注释行不是 CSV: \(row)")
+            for cell in row.split(separator: ",") {
+                XCTAssertNotNil(Double(cell), "\(cell) 不是数字")
+            }
+        }
+    }
+
+    /// …and the columns really do pair each curve with its own values.
+    ///
+    /// A wide table that put B's y in A's column would pass every check above.
+    func testTheWideTableKeepsEachCurveInItsOwnColumns() throws {
+        let short = CurveLine(name: "short", color: RGB8(r: 0, g: 0, b: 0),
+                              points: [PixelPoint(x: 100, y: 600)])            // -> (0, 0)
+        let long = makeLine("long")                                             // -> 3 points
+        let text = try Exporter.text(for: [short, long],
+                                     calibration: calibration, format: .csv)
+        // `omittingEmptySubsequences: false` throughout: the empty cells are the
+        // thing under test, and the default would swallow them and make a
+        // two-column row look like a four-column one.
+        let rows = text.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.split(separator: ",", omittingEmptySubsequences: false).map(String.init) }
+
+        // 表头 + 最长那条曲线的 3 行;末尾还有一个空串,是正文末尾那个换行。
+        XCTAssertEqual(rows.dropLast().count, 4)
+        XCTAssertEqual(rows[1], ["0", "0", "0", "0"], "两边的第一个点都在第一行")
+        // The short curve has run out: its cells are empty, and the long curve's
+        // values stay in columns 3 and 4 rather than sliding left.
+        XCTAssertEqual(rows[3], ["", "", "10.000000", "5.000000"])
+    }
+
+    /// TXT is for reading, so it keeps the labelled blocks.
+    func testMultipleCurvesInTXTStayLabelledBlocks() throws {
+        let text = try Exporter.text(for: [makeLine("A"), makeLine("B")],
+                                     calibration: calibration, format: .txt)
         XCTAssertTrue(text.contains("# A"))
         XCTAssertTrue(text.contains("# B"))
     }

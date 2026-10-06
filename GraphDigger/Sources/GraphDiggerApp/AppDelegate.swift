@@ -41,6 +41,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// not a word.
     private var gridAxisItems: [GridAxis: NSMenuItem] = [:]
 
+    /// The tick beside 「显示原图」, kept so `refreshUI` can move it.
+    private var showsImageMenuItem: NSMenuItem!
+
+    /// The data-space plot (FR-7.1), built the first time it is asked for.
+    ///
+    /// Held rather than rebuilt so the window keeps its position and size, and
+    /// because a second window showing the same document has to be *updated*
+    /// with it rather than re-created from it.
+    private var dataPlotWindow: NSWindow?
+    private var dataPlotView: DataPlotView?
+
     /// The project file this document was opened from, or last saved to.
     ///
     /// Nil after opening a bare image and before the first save: `⌘S` then has
@@ -254,8 +265,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         exportItem.submenu = exportMenu
         fileMenu.addItem(exportItem)
 
-        fileMenu.addItem(withTitle: "Copy Data to Clipboard",
+        // The same list, narrowed to the curve in hand. Worth a second submenu
+        // rather than a modifier on the first: five curves out of a paper and one
+        // of them wanted is the ordinary case, and the alternative was exporting
+        // all five and deleting four columns by hand.
+        let exportActiveItem = NSMenuItem(title: "Export Current Curve (只导出当前曲线)",
+                                          action: nil, keyEquivalent: "")
+        let exportActiveMenu = NSMenu(title: "Export Current Curve")
+        for format in ExportFormat.allCases {
+            let item = NSMenuItem(title: format.displayName,
+                                  action: #selector(exportCurrentCurve(_:)), keyEquivalent: "")
+            item.representedObject = format.rawValue
+            exportActiveMenu.addItem(item)
+        }
+        exportActiveItem.submenu = exportActiveMenu
+        fileMenu.addItem(exportActiveItem)
+
+        fileMenu.addItem(withTitle: "Copy Data to Clipboard (复制全部曲线)",
                          action: #selector(copyData(_:)), keyEquivalent: "c")
+        let copyActive = NSMenuItem(title: "Copy Current Curve (复制当前曲线)",
+                                    action: #selector(copyCurrentCurve(_:)), keyEquivalent: "c")
+        copyActive.keyEquivalentModifierMask = [.command, .option]
+        fileMenu.addItem(copyActive)
         fileMenu.addItem(.separator())
         fileMenu.addItem(withTitle: "Close Window",
                          action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
@@ -374,6 +405,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         viewMenu.addItem(withTitle: "Zoom In", action: #selector(zoomIn(_:)), keyEquivalent: "+")
         viewMenu.addItem(withTitle: "Zoom Out", action: #selector(zoomOut(_:)), keyEquivalent: "-")
         viewMenu.addItem(withTitle: "Fit to Window", action: #selector(zoomToFit(_:)), keyEquivalent: "9")
+        viewMenu.addItem(.separator())
+        // The two views that exist to *check* the work rather than to do it. Both
+        // are looking aids, so both live here and neither is in the undo history.
+        let showImage = NSMenuItem(title: "Show Image (显示原图)",
+                                   action: #selector(toggleShowsImage(_:)), keyEquivalent: "i")
+        showImage.keyEquivalentModifierMask = [.command, .shift]
+        viewMenu.addItem(showImage)
+        showsImageMenuItem = showImage
+
+        let dataView = NSMenuItem(title: "Data View (数据视图)",
+                                  action: #selector(showDataPlot(_:)), keyEquivalent: "d")
+        dataView.keyEquivalentModifierMask = [.command, .shift]
+        viewMenu.addItem(dataView)
         viewItem.submenu = viewMenu
 
         NSApp.mainMenu = main
@@ -536,7 +580,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
     }
 
+    // MARK: - Data view
+
+    @objc private func toggleShowsImage(_ sender: Any?) {
+        canvas.showsImage.toggle()
+        refreshUI(canvas.showsImage ? "显示原图" : "已隐藏原图 —— 只留取到的点")
+    }
+
+    /// Opens the data-space plot, or brings it forward if it is already up.
+    ///
+    /// Its own window because there is nowhere else to put it: the toolbar has
+    /// 13pt of width to spare and the side panel is 272pt wide against a 1440pt
+    /// screen, and a plot that has to be *read* needs more than either.
+    @objc private func showDataPlot(_ sender: Any?) {
+        if dataPlotWindow == nil {
+            let view = DataPlotView(frame: NSRect(x: 0, y: 0, width: 560, height: 420))
+            let window = NSWindow(contentRect: view.frame,
+                                  styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                                  backing: .buffered, defer: false)
+            window.title = "数据视图"
+            window.contentView = view
+            window.minSize = NSSize(width: 320, height: 240)
+            window.isReleasedWhenClosed = false
+            window.center()
+            // Offset from the main window so the two can be seen together, which
+            // is the entire point of it being a second window.
+            if let main = self.window {
+                window.setFrameTopLeftPoint(NSPoint(x: main.frame.minX - 40,
+                                                    y: main.frame.maxY + 30))
+            }
+            dataPlotWindow = window
+            dataPlotView = view
+        }
+        dataPlotView?.state = canvas.state
+        dataPlotWindow?.makeKeyAndOrderFront(nil)
+    }
+
     // MARK: - Closing
+
+    /// The data view is a view *of* the document, so it goes when the document
+    /// does. Left behind it would keep the app alive with nothing to show: the
+    /// last window is what tells AppKit to quit.
+    func windowWillClose(_ notification: Notification) {
+        guard let closed = notification.object as? NSWindow, closed === window else { return }
+        dataPlotWindow?.close()
+    }
 
     /// Asks before anything discards work that lives only in memory.
     ///
@@ -612,17 +700,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func exportData(_ sender: Any?) {
+        exportCommand(sender, onlyActive: false)
+    }
+
+    @objc private func exportCurrentCurve(_ sender: Any?) {
+        exportCommand(sender, onlyActive: true)
+    }
+
+    /// Both export menus land here; only the set of curves differs.
+    private func exportCommand(_ sender: Any?, onlyActive: Bool) {
         // From the toolbar the format is chosen by a small menu; from the menu
         // bar the item already carries one.
         if let item = sender as? NSMenuItem, let raw = item.representedObject as? String,
            let format = ExportFormat(rawValue: raw) {
-            performExport(format: format, relativeTo: nil)
+            performExport(format: format, relativeTo: nil, onlyActive: onlyActive)
         } else {
-            presentFormatChooser()
+            presentFormatChooser(onlyActive: onlyActive)
         }
     }
 
-    private func presentFormatChooser() {
+    /// The curves a command applies to: the one in hand, or all of them.
+    ///
+    /// The active curve, not "the first one": the point of the command is to get
+    /// *this* curve out, and the user has already said which one that is by
+    /// selecting it.
+    private func curvesForExport(onlyActive: Bool) -> [CurveLine] {
+        guard onlyActive, let active = canvas.state.activeLine else { return canvas.state.lines }
+        return [active]
+    }
+
+    private func presentFormatChooser(onlyActive: Bool) {
         let alert = NSAlert()
         alert.messageText = "导出为哪种格式?"
         alert.informativeText = "CSV / TSV 最通用;DXF 给 CAD;EPS 是矢量图。"
@@ -633,16 +740,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.addButton(withTitle: "取消")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         let format = ExportFormat.allCases[max(0, popup.indexOfSelectedItem)]
-        performExport(format: format, relativeTo: nil)
+        performExport(format: format, relativeTo: nil, onlyActive: onlyActive)
     }
 
-    private func performExport(format: ExportFormat, relativeTo sender: NSView?) {
+    private func performExport(format: ExportFormat, relativeTo sender: NSView?,
+                               onlyActive: Bool = false) {
         // Bytes rather than text: the workbook is a ZIP, and routing every format
         // through one call is what keeps the save panel from having to know which
         // formats happen to be strings.
+        let lines = curvesForExport(onlyActive: onlyActive)
         let payload: Data
         do {
-            payload = try Exporter.data(for: canvas.state.lines,
+            payload = try Exporter.data(for: lines,
                                         calibration: canvas.state.calibration,
                                         format: format)
         } catch {
@@ -651,20 +760,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = "digitized.\(format.fileExtension)"
+        // Named after the curve when there is only one, so a folder of single
+        // exports is navigable rather than a row of `digitized.csv`.
+        panel.nameFieldStringValue = (lines.count == 1
+            ? Self.fileNameStem(lines[0].name)
+            : "digitized") + ".\(format.fileExtension)"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
             try payload.write(to: url, options: .atomic)
-            refreshUI("已导出到 \(url.lastPathComponent)")
+            refreshUI("已导出 \(lines.count) 条曲线到 \(url.lastPathComponent)")
         } catch {
             presentError("写入失败:\(error.localizedDescription)")
         }
     }
 
     @objc private func copyData(_ sender: Any?) {
+        copyToClipboard(onlyActive: false)
+    }
+
+    @objc private func copyCurrentCurve(_ sender: Any?) {
+        copyToClipboard(onlyActive: true)
+    }
+
+    /// TSV, because that is what a spreadsheet pastes. Several curves arrive as a
+    /// wide table — one x/y pair per curve — since that is what lines up with
+    /// columns; the labelled-block layout would paste each name into a cell of
+    /// its own and shift everything below it.
+    private func copyToClipboard(onlyActive: Bool) {
+        let lines = curvesForExport(onlyActive: onlyActive)
         let text: String
         do {
-            text = try Exporter.text(for: canvas.state.lines,
+            text = try Exporter.text(for: lines,
                                      calibration: canvas.state.calibration,
                                      format: .tsv)
         } catch {
@@ -674,8 +800,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let board = NSPasteboard.general
         board.clearContents()
         board.setString(text, forType: .string)
-        let count = canvas.state.lines.reduce(0) { $0 + $1.points.count }
-        refreshUI("已复制 \(count) 个数据点到剪贴板")
+        let count = lines.reduce(0) { $0 + $1.points.count }
+        refreshUI("已复制 \(lines.count) 条曲线的 \(count) 个数据点到剪贴板")
+    }
+
+    /// A curve name fit to be a file name: a `/` in a name would silently become
+    /// a directory separator, and an empty name would leave a file called ".csv".
+    private static func fileNameStem(_ name: String) -> String {
+        let cleaned = name.components(separatedBy: CharacterSet(charactersIn: "/:\\"))
+            .joined(separator: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned.isEmpty ? "digitized" : cleaned
     }
 
     private func presentExportError(_ error: Error) {
@@ -1065,6 +1200,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         redoMenuItem.title = canvas.redoLabel.map { "重做 \($0)" } ?? "重做"
         redoMenuItem.isEnabled = canvas.canRedo
 
+        showsImageMenuItem.state = canvas.showsImage ? .on : .off
+        // The second view of the same document is refreshed from the same place.
+        // Only when it exists — opening it is the user's move, not something the
+        // first edit should do on his behalf.
+        if dataPlotView != nil { dataPlotView?.state = canvas.state }
+
         // The tick on the grid direction. Written here rather than in
         // `validateMenuItem` because this already runs on every state change and
         // two readers of the same setting is how they end up disagreeing.
@@ -1203,7 +1344,9 @@ extension AppDelegate: ToolbarDelegate {
     }
 
     func toolbarDidRequestExport(_ toolbar: ToolbarView, from sender: NSView) {
-        presentFormatChooser()
+        // The toolbar's 导出 button is the general one; 只导出当前曲线 is a menu
+        // command, because the toolbar has no width left for a second button.
+        presentFormatChooser(onlyActive: false)
     }
 
     func toolbarDidRequestFit(_ toolbar: ToolbarView) {
