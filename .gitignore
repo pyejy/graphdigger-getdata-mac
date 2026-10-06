@@ -7,3 +7,6 @@
 # SwiftPM 的产物目录。真正的包在 GraphDigger/ 里(它自己也有这条);
 # 这里再写一条是因为在外层目录误跑 swift build 会留下一个空的 .build 脚手架。
 .build/
+
+# 项目内的 conda 环境(245M,不属于仓库内容)
+.cenv/
