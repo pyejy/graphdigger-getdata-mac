@@ -47,14 +47,30 @@ final class DataPlotView: NSView {
         bounds.fill()
 
         let rect = plotRect
-        guard let calibration = state.calibration else {
+        guard let calibration = state.activeCalibration else {
             drawNotice("还没有标定坐标系。\n点「标定坐标系」建立坐标系后，这里会画出取点结果。")
             return
         }
 
-        // Only the curves the user can see on the canvas: this view is for
-        // judging them, and a curve hidden there is hidden here too.
-        let curves = state.lines.filter { $0.isVisible }
+        // Only the curves of the coordinate system being worked on, and only the
+        // ones the user can see on the canvas — this view is for judging them,
+        // and a curve hidden there is hidden here too.
+        //
+        // Curves from another system are left out rather than drawn on the same
+        // axes: a figure with `(a)` on 0–10 and `(b)` on 0–1000 has no shared
+        // scale, and putting them on one would squash one of them flat against
+        // the axis. The header says there are other systems, so the curves are
+        // not merely missing-looking.
+        // A curve with no owner at all (one built outside the app, or a project
+        // from before owners existed) counts as the active system's: with a
+        // single system that is the only thing it could mean.
+        let activeSystemID = state.activeSystem?.id
+        let curves = state.lines.filter {
+            $0.isVisible && ($0.calibrationID == activeSystemID || $0.calibrationID == nil)
+        }
+        let otherCurves = state.lines.filter {
+            $0.isVisible && $0.calibrationID != nil && $0.calibrationID != activeSystemID
+        }
         let converted: [(line: CurveLine, points: [DataPoint], skipped: Int)] = curves.map { line in
             var points: [DataPoint] = []
             var skipped = 0
@@ -105,7 +121,8 @@ final class DataPlotView: NSView {
         for entry in ordered { drawCurve(entry.line, entry.points, point) }
         NSGraphicsContext.restoreGraphicsState()
 
-        drawHeader(rect: rect, curves: curves.count, points: all.count, skipped: skipped)
+        drawHeader(rect: rect, curves: curves.count, points: all.count, skipped: skipped,
+                   otherSystems: otherCurves.isEmpty ? 0 : max(0, state.systems.count - 1))
     }
 
     private func drawCurve(_ line: CurveLine,
@@ -191,9 +208,15 @@ final class DataPlotView: NSView {
         }
     }
 
-    private func drawHeader(rect: NSRect, curves: Int, points: Int, skipped: Int) {
+    private func drawHeader(rect: NSRect, curves: Int, points: Int, skipped: Int,
+                            otherSystems: Int) {
         var text = "\(curves) 条曲线 · \(points) 个点"
         if skipped > 0 { text += " · \(skipped) 个点无法表示" }
+        // Said out loud because the curves are simply absent from the plot, and
+        // "where did my other curve go" is a worse question than an extra clause.
+        if otherSystems > 0 {
+            text += " · 只画当前坐标系,另有 \(otherSystems) 套未画"
+        }
         let attributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 11),
             .foregroundColor: NSColor.secondaryLabelColor,

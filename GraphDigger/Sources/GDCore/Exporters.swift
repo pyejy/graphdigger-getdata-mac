@@ -93,6 +93,15 @@ public enum DecimalSeparator: String, CaseIterable, Sendable {
     }
 }
 
+/// How a curve's pixels become numbers.
+///
+/// Exporters take this instead of a single map because a project can hold more
+/// than one coordinate system (FR-13) — a three-subplot figure has three — and
+/// an export that converted every curve with the one being looked at would
+/// produce numbers that look entirely plausible and are wrong by the ratio
+/// between two panels' ranges.
+public typealias CalibrationResolver = (CurveLine) -> CalibrationMap?
+
 public enum ExportError: Error, Equatable {
     case calibrationMissing
     case noPoints
@@ -110,7 +119,9 @@ public enum Exporter {
     /// - Parameters:
     ///   - lines: curves to write; hidden lines are included (visibility is a
     ///     display concern).
-    ///   - calibration: mapping from stored pixel points to chart values.
+    ///   - calibration: mapping from stored pixel points to chart values. Used
+    ///     for every curve, so it is only right for a project whose curves share
+    ///     one coordinate system.
     ///   - format: target format.
     ///   - includeHeader: emit a column-name row where the format supports it.
     ///   - decimalSeparator: how numbers are spelt in the delimited formats.
@@ -118,25 +129,31 @@ public enum Exporter {
     ///     package or a PostScript interpreter reading `1,5` is reading a
     ///     two-element list. XLSX ignores it too, because its numbers are stored
     ///     as numbers rather than as text.
+    ///   - resolver: which mapping each curve is measured in. **Overrides
+    ///     `calibration` entirely when given**, rather than falling back to it —
+    ///     a curve whose own system is uncalibrated must fail loudly, not be
+    ///     quietly re-measured in a neighbouring panel's units.
     public static func text(for lines: [CurveLine],
                             calibration: CalibrationMap?,
                             format: ExportFormat,
                             includeHeader: Bool = true,
-                            decimalSeparator: DecimalSeparator = .dot) throws -> String {
+                            decimalSeparator: DecimalSeparator = .dot,
+                            resolvingWith resolver: CalibrationResolver? = nil) throws -> String {
         let populated = lines.filter { !$0.points.isEmpty }
         guard !populated.isEmpty else { throw ExportError.noPoints }
+        let mapFor = Self.map(for: calibration, resolver: resolver)
 
         switch format {
         case .csv, .tsv, .txt:
-            return try delimited(populated, calibration: calibration,
+            return try delimited(populated, mapFor: mapFor,
                                  format: format, includeHeader: includeHeader,
                                  decimalSeparator: decimalSeparator)
         case .xml:
-            return try xml(populated, calibration: calibration)
+            return try xml(populated, mapFor: mapFor)
         case .dxf:
-            return try dxf(populated, calibration: calibration)
+            return try dxf(populated, mapFor: mapFor)
         case .eps:
-            return try eps(populated, calibration: calibration)
+            return try eps(populated, mapFor: mapFor)
         case .xlsx:
             throw ExportError.notATextFormat
         }
@@ -153,17 +170,34 @@ public enum Exporter {
                             calibration: CalibrationMap?,
                             format: ExportFormat,
                             includeHeader: Bool = true,
-                            decimalSeparator: DecimalSeparator = .dot) throws -> Data {
+                            decimalSeparator: DecimalSeparator = .dot,
+                            resolvingWith resolver: CalibrationResolver? = nil) throws -> Data {
         if format == .xlsx {
             // The separator is accepted and dropped on purpose: a workbook holds
             // real numbers, and how the reader's Excel *displays* them is the
             // reader's own locale. Refusing here would make the caller special-case
             // the format, which is the thing this entry point exists to prevent.
-            return try XLSXWriter.data(for: lines, calibration: calibration)
+            return try XLSXWriter.data(for: lines, calibration: calibration,
+                                       resolvingWith: resolver)
         }
         return Data(try text(for: lines, calibration: calibration,
                              format: format, includeHeader: includeHeader,
-                             decimalSeparator: decimalSeparator).utf8)
+                             decimalSeparator: decimalSeparator,
+                             resolvingWith: resolver).utf8)
+    }
+
+    /// Turns the two ways of saying "which mapping" into one answer per curve.
+    ///
+    /// A resolver, once supplied, is **absolute**: a curve whose own system has
+    /// no mapping gets nil, even though `calibration` could have answered. That
+    /// nil becomes `ExportError.calibrationMissing`, which the app reports; the
+    /// alternative — borrowing a neighbouring system — is the one failure this
+    /// feature exists to make impossible, and it leaves no trace, because the
+    /// pixels do not move and only their meaning does.
+    static func map(for calibration: CalibrationMap?,
+                    resolver: CalibrationResolver?) -> CalibrationResolver {
+        guard let resolver else { return { _ in calibration } }
+        return resolver
     }
 
     /// Value for a point, used by the numeric formats.
@@ -220,7 +254,7 @@ public enum Exporter {
     }
 
     private static func delimited(_ lines: [CurveLine],
-                                  calibration: CalibrationMap?,
+                                  mapFor: CalibrationResolver,
                                   format: ExportFormat,
                                   includeHeader: Bool,
                                   decimalSeparator: DecimalSeparator) throws -> String {
@@ -235,9 +269,10 @@ public enum Exporter {
         /// below cannot each pick their own answer.
         func number(_ v: Double) -> String { decimal(v, separator: decimalSeparator) }
 
-        /// One curve's points as chart values, in display order.
+        /// One curve's points as chart values, in display order. Each curve in
+        /// its own coordinate system — see `CalibrationResolver`.
         func rows(_ line: CurveLine) throws -> [DataPoint] {
-            try line.orderedPoints.map { try value($0, calibration) }
+            try line.orderedPoints.map { try value($0, mapFor(line)) }
         }
 
         // One curve: a plain two-column table.
@@ -310,24 +345,56 @@ public enum Exporter {
             .replacingOccurrences(of: "\"", with: "&quot;")
     }
 
+    /// The mappings an export actually used, each with the curves it measured.
+    ///
+    /// Distinct by value, so two systems that happen to agree collapse into one
+    /// block: what the reader wants is "how do I get back from these numbers to
+    /// pixels", and a duplicate answer to that adds nothing.
+    private static func usedMappings(_ lines: [CurveLine],
+                                     mapFor: CalibrationResolver) -> [(map: CalibrationMap,
+                                                                       curves: [String])] {
+        var out: [(map: CalibrationMap, curves: [String])] = []
+        for line in lines {
+            guard let map = mapFor(line) else { continue }
+            if let index = out.firstIndex(where: { $0.map == map }) {
+                out[index].curves.append(line.name)
+            } else {
+                out.append((map, [line.name]))
+            }
+        }
+        return out
+    }
+
     private static func xml(_ lines: [CurveLine],
-                            calibration: CalibrationMap?) throws -> String {
+                            mapFor: CalibrationResolver) throws -> String {
+        let used = usedMappings(lines, mapFor: mapFor)
         var out = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<graphdigger>\n"
-        out += "  <calibration>\n"
-        if let c = calibration {
+        for entry in used {
+            // One block per mapping, and the block says which curves it measured:
+            // with two coordinate systems a bare `<calibration>` would be an
+            // answer with no question attached, and the reader would have no way
+            // to tell which points it applies to.
+            //
+            // The `curves` attribute appears only when there is more than one
+            // block, so a single-system export — every file written before
+            // FR-13, and most written after — is byte for byte what it was.
+            let qualifier = used.count > 1
+                ? " curves=\"\(escaped(entry.curves.joined(separator: ", ")))\""
+                : ""
+            out += "  <calibration\(qualifier)>\n"
             func axis(_ name: String, _ a: AxisCalibration) {
                 out += "    <axis name=\"\(name)\" pixelMin=\"\(decimal(a.pixelMin))\""
                 out += " valueMin=\"\(decimal(a.valueMin))\" pixelMax=\"\(decimal(a.pixelMax))\""
                 out += " valueMax=\"\(decimal(a.valueMax))\" logarithmic=\"\(a.isLogarithmic)\"/>\n"
             }
-            axis("x", c.x)
-            axis("y", c.y)
+            axis("x", entry.map.x)
+            axis("y", entry.map.y)
+            out += "  </calibration>\n"
         }
-        out += "  </calibration>\n"
         for line in lines {
             out += "  <curve name=\"\(escaped(line.name))\">\n"
             for point in line.orderedPoints {
-                let d = try value(point, calibration)
+                let d = try value(point, mapFor(line))
                 out += "    <point x=\"\(decimal(d.x))\" y=\"\(decimal(d.y))\"/>\n"
             }
             out += "  </curve>\n"
@@ -339,14 +406,14 @@ public enum Exporter {
     /// Minimal DXF R12 (AC1009) with a POLYLINE entity per curve — the form
     /// every CAD package reads without complaint.
     private static func dxf(_ lines: [CurveLine],
-                            calibration: CalibrationMap?) throws -> String {
+                            mapFor: CalibrationResolver) throws -> String {
         var out = "0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\nAC1009\n0\nENDSEC\n"
         out += "0\nSECTION\n2\nENTITIES\n"
         for line in lines {
             out += "0\nPOLYLINE\n8\n\(escaped(line.name))\n66\n1\n70\n0\n"
             out += "62\n\(Self.aciIndex(for: line.color))\n"
             for point in line.orderedPoints {
-                let d = try value(point, calibration)
+                let d = try value(point, mapFor(line))
                 out += "0\nVERTEX\n8\n\(escaped(line.name))\n"
                 out += "10\n\(decimal(d.x))\n20\n\(decimal(d.y))\n30\n0.0\n"
             }
@@ -359,8 +426,10 @@ public enum Exporter {
     /// PostScript with a line per curve. Coordinates are emitted in data space
     /// after a translate to keep them positive.
     private static func eps(_ lines: [CurveLine],
-                            calibration: CalibrationMap?) throws -> String {
-        let all = try lines.flatMap { try $0.orderedPoints.map { try value($0, calibration) } }
+                            mapFor: CalibrationResolver) throws -> String {
+        let all = try lines.flatMap { line in
+            try line.orderedPoints.map { try value($0, mapFor(line)) }
+        }
         let minX = all.map(\.x).min() ?? 0, maxX = all.map(\.x).max() ?? 1
         let minY = all.map(\.y).min() ?? 0, maxY = all.map(\.y).max() ?? 1
         let width = max(maxX - minX, 1e-9), height = max(maxY - minY, 1e-9)
@@ -375,7 +444,7 @@ public enum Exporter {
             out += "\(decimal(Double(line.color.g) / 255)) "
             out += "\(decimal(Double(line.color.b) / 255)) setrgbcolor\n"
             for (i, point) in line.orderedPoints.enumerated() {
-                let d = try value(point, calibration)
+                let d = try value(point, mapFor(line))
                 let px = 30 + (d.x - minX) * scale
                 let py = 30 + (d.y - minY) * scale
                 out += i == 0

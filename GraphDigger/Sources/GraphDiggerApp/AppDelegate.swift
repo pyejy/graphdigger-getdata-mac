@@ -843,6 +843,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         performExport(format: format, relativeTo: nil, onlyActive: onlyActive)
     }
 
+    /// Which coordinate system each curve is measured in, for the exporters.
+    ///
+    /// The state is captured by value so the answer cannot change between the
+    /// moment the export starts and the moment the last curve is written — the
+    /// whole set of numbers has to come from one consistent reading of the
+    /// project, not from whatever the canvas looks like halfway through.
+    ///
+    /// Passing this rather than the active system's map is the point of FR-13:
+    /// on a figure with three panels, `canvas.state.calibration` is panel (b)'s
+    /// mapping, and applying it to a curve from panel (a) yields numbers that
+    /// look perfectly ordinary and are wrong by the ratio between the two
+    /// panels' ranges.
+    private func calibrationResolver() -> CalibrationResolver {
+        let state = canvas.state
+        return { state.calibration(for: $0) }
+    }
+
     /// The bytes an export would write, preferences and all.
     ///
     /// Split out of `performExport` because the save panel that follows cannot be
@@ -853,7 +870,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         try Exporter.data(for: curvesForExport(onlyActive: onlyActive),
                           calibration: canvas.state.calibration,
                           format: format,
-                          decimalSeparator: exportDecimalSeparator)
+                          decimalSeparator: exportDecimalSeparator,
+                          resolvingWith: calibrationResolver())
     }
 
     /// The same, for the clipboard — split out for the same reason, and so the
@@ -864,7 +882,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         try Exporter.text(for: curvesForExport(onlyActive: onlyActive),
                           calibration: canvas.state.calibration,
                           format: .tsv,
-                          decimalSeparator: exportDecimalSeparator)
+                          decimalSeparator: exportDecimalSeparator,
+                          resolvingWith: calibrationResolver())
     }
 
     private func performExport(format: ExportFormat, relativeTo sender: NSView?,
@@ -1280,7 +1299,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if reloadingPanel {
             sidebar.update(lines: lines,
                            calibration: canvas.state.calibration,
-                           activeID: canvas.state.activeLineID)
+                           activeID: canvas.state.activeLineID,
+                           resolvingWith: calibrationResolver())
         }
 
         // The step prompt walks the user through the pipeline in order, which is

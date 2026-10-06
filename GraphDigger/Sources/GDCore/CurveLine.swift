@@ -46,6 +46,21 @@ public struct CurveLine: Identifiable, Equatable, Codable, Sendable {
     /// `ProjectState` clears it.
     public var sweptOrder: [Int]?
 
+    /// Which coordinate system this curve's pixels are measured in — FR-13.
+    ///
+    /// **Optional only so that a project written before coordinate systems
+    /// existed still opens.** A format-v1 file has one `calibration` for the
+    /// whole project and curves that never had to say whose it was;
+    /// `ProjectState.init(from:)` fills this in from that single system, so from
+    /// the first load onward it is always set.
+    ///
+    /// Set at birth from the project's active system rather than left nil and
+    /// resolved later, because "which system is this curve in" is exactly the
+    /// question a wrong answer to which is invisible: on a three-subplot figure
+    /// the ranges differ by orders of magnitude, so converting with the
+    /// neighbour's mapping produces numbers that look perfectly plausible.
+    public var calibrationID: UUID?
+
     public init(id: UUID = UUID(),
                 name: String,
                 color: RGB8,
@@ -55,7 +70,8 @@ public struct CurveLine: Identifiable, Equatable, Codable, Sendable {
                 backgroundColor: RGB8? = nil,
                 colorTolerance: Double = 60,
                 order: PointOrder = .extraction,
-                sweptOrder: [Int]? = nil) {
+                sweptOrder: [Int]? = nil,
+                calibrationID: UUID? = nil) {
         self.id = id
         self.name = name
         self.color = color
@@ -66,6 +82,7 @@ public struct CurveLine: Identifiable, Equatable, Codable, Sendable {
         self.colorTolerance = colorTolerance
         self.order = order
         self.sweptOrder = sweptOrder
+        self.calibrationID = calibrationID
     }
 
     /// Points in their configured order. This is what gets drawn and exported —
@@ -164,10 +181,73 @@ public enum PointCoordinate: String, CaseIterable, Codable, Sendable {
     case y
 }
 
+/// One coordinate system: a pixel↔value mapping, the anchors it was traced from,
+/// and a name to tell it from the others — FR-13.
+///
+/// A journal figure with `(a)(b)(c)` subplots has three of these on one image,
+/// and nothing about the pixels says which curve belongs to which: the ranges
+/// differ — 0–10 beside 0–100 — so a curve converted through the wrong one
+/// yields numbers that look plausible and are wrong by an order of magnitude.
+/// That is the whole reason each curve names its own system instead of the
+/// project having one.
+///
+/// `calibration` is optional because a system exists from the moment the project
+/// does. An image with no axes traced yet still needs somewhere for the first
+/// calibration to land, and "declared, not yet calibrated" is a state the window
+/// has to show rather than a missing object it has to guard against.
+public struct CoordinateSystem: Identifiable, Equatable, Codable, Sendable {
+    public var id: UUID
+    public var name: String
+    public var calibration: CalibrationMap?
+    /// The four clicked anchors, kept for drawing the rules the user traced. The
+    /// mapping itself lives in `calibration`.
+    public var anchors: CalibrationAnchors?
+
+    public init(id: UUID = UUID(),
+                name: String,
+                calibration: CalibrationMap? = nil,
+                anchors: CalibrationAnchors? = nil) {
+        self.id = id
+        self.name = name
+        self.calibration = calibration
+        self.anchors = anchors
+    }
+
+    public var isCalibrated: Bool { calibration != nil }
+
+    /// The anchors to draw, synthesised from the mapping when none were kept — a
+    /// system whose calibration was built before anchors were stored, or edited
+    /// into existence. Returns nil for an uncalibrated system, which has neither.
+    public func displayAnchors() -> CalibrationAnchors? {
+        anchors ?? calibration.map(CalibrationAnchors.init(fallbackFrom:))
+    }
+}
+
 /// Everything about a digitising session except the image itself, which belongs
 /// to the app layer.
 public struct ProjectState: Equatable, Codable, Sendable {
-    public var calibration: CalibrationMap?
+
+    /// The coordinate systems of this project — FR-13.
+    ///
+    /// **Optional on purpose**, like every field added after the format shipped:
+    /// the rule in `ProjectFile` is that a new field must be one the decoder can
+    /// fill from a missing key, and only `Optional` qualifies. A project saved
+    /// before this feature carries one `calibration` for the whole project
+    /// instead, and `init(from:)` turns that into a single system — so nothing
+    /// downstream ever has to ask which shape the file was.
+    ///
+    /// Read it through `systems`, which cannot be nil, or through `activeSystem`
+    /// when what is wanted is the one being worked on.
+    public var coordinateSystems: [CoordinateSystem]?
+
+    /// Which system the tools act on: the one being calibrated, the one whose
+    /// axes are drawn brightest, and the one new curves join.
+    ///
+    /// Optional for the same reason as above. An absent or stale id reads as the
+    /// first system, so a single-system project never has to think about it and
+    /// deleting the active system cannot leave the app pointing at nothing.
+    public var activeCoordinateSystemID: UUID?
+
     public var lines: [CurveLine]
     public var activeLineID: UUID?
 
@@ -234,11 +314,6 @@ public struct ProjectState: Equatable, Codable, Sendable {
     /// the only thing that stops them drifting.
     public var symbolDiameter: Int { markerDiameter ?? 11 }
 
-    /// The four clicked anchors — X start, X end, Y start, Y end. Kept for
-    /// drawing the axis rules the user actually traced; the mapping itself
-    /// lives in `calibration`. The two axes may have different starts.
-    public var calibrationAnchors: CalibrationAnchors?
-
     public init(calibration: CalibrationMap? = nil,
                 lines: [CurveLine] = [],
                 activeLineID: UUID? = nil,
@@ -250,7 +325,15 @@ public struct ProjectState: Equatable, Codable, Sendable {
                 traceSpacing: Int = 1,
                 markerDiameter: Int? = nil,
                 calibrationAnchors: CalibrationAnchors? = nil) {
-        self.calibration = calibration
+        // A project always has at least one coordinate system, calibrated or not,
+        // which is what makes "which system is this curve in" answerable from the
+        // first curve onward. The id is `firstSystemID` rather than a fresh one so
+        // that a state built here equals the one a format-v1 file migrates to.
+        self.coordinateSystems = [CoordinateSystem(id: Self.firstSystemID,
+                                                   name: Self.defaultSystemName,
+                                                   calibration: calibration,
+                                                   anchors: calibrationAnchors)]
+        self.activeCoordinateSystemID = Self.firstSystemID
         self.lines = lines
         self.activeLineID = activeLineID
         self.defaultBackgroundColor = defaultBackgroundColor
@@ -260,7 +343,191 @@ public struct ProjectState: Equatable, Codable, Sendable {
         self.gridOffset = gridOffset
         self.traceSpacing = traceSpacing
         self.markerDiameter = markerDiameter
-        self.calibrationAnchors = calibrationAnchors
+    }
+
+    // MARK: - Coordinate systems (FR-13)
+
+    /// The id a project written before coordinate systems existed migrates to,
+    /// and the one a fresh project's first system gets.
+    ///
+    /// A fixed value rather than a `UUID()` per load, so opening the same old
+    /// file twice yields the same state. That is what lets the migration be
+    /// asserted by comparing two states instead of by describing one, and it
+    /// keeps `CurveLine.calibrationID` consistent with the system it names.
+    /// Nothing ever merges two projects, so the sharing costs nothing.
+    public static let firstSystemID = UUID(uuidString: "00000000-0000-0000-0000-0000000000A1")!
+
+    public static let defaultSystemName = "坐标系 1"
+
+    /// What a file written by this build contains.
+    ///
+    /// Spelled out rather than synthesised because the encoder and the decoder
+    /// need **different** key sets: the v1 names below are read so that an old
+    /// project still opens, but must never be written, or a file would carry two
+    /// answers to "what is this project's calibration" and a reader would have to
+    /// guess which one is current.
+    private enum CodingKeys: String, CodingKey {
+        case coordinateSystems, activeCoordinateSystemID
+        case lines, activeLineID
+        case defaultBackgroundColor, defaultColorTolerance, gridSpacing
+        case gridAxis, gridOffset, traceSpacing, markerDiameter
+    }
+
+    /// The names a **format-v1** file uses: one mapping for the whole project.
+    /// Decode-only, and read from a second container so nothing here can leak
+    /// into a file this build writes.
+    private enum LegacyCodingKeys: String, CodingKey {
+        case calibration, calibrationAnchors
+    }
+
+    /// Decodes both file shapes into one model.
+    ///
+    /// **Every field has to be listed here**, or it silently decodes as its
+    /// default — which is the one hazard a hand-written decoder adds to a type
+    /// whose fields are all optional for exactly this reason. The JSON round-trip
+    /// test sets each field to a non-default value, so a forgotten one shows up
+    /// as a state that does not equal itself.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        lines = try container.decodeIfPresent([CurveLine].self, forKey: .lines) ?? []
+        activeLineID = try container.decodeIfPresent(UUID.self, forKey: .activeLineID)
+        defaultBackgroundColor = try container.decodeIfPresent(RGB8.self,
+                                                               forKey: .defaultBackgroundColor)
+        defaultColorTolerance = try container.decodeIfPresent(Double.self,
+                                                              forKey: .defaultColorTolerance) ?? 60
+        gridSpacing = try container.decodeIfPresent(Int.self, forKey: .gridSpacing) ?? 8
+        gridAxis = try container.decodeIfPresent(GridAxis.self, forKey: .gridAxis)
+        gridOffset = try container.decodeIfPresent(Int.self, forKey: .gridOffset)
+        traceSpacing = try container.decodeIfPresent(Int.self, forKey: .traceSpacing) ?? 1
+        markerDiameter = try container.decodeIfPresent(Int.self, forKey: .markerDiameter)
+
+        let systems = try container.decodeIfPresent([CoordinateSystem].self,
+                                                    forKey: .coordinateSystems)
+        if let systems, !systems.isEmpty {
+            coordinateSystems = systems
+            activeCoordinateSystemID = try container.decodeIfPresent(UUID.self,
+                                                                     forKey: .activeCoordinateSystemID)
+        } else {
+            // Format v1: one mapping for the whole project, and curves that were
+            // never asked which mapping they belonged to.
+            let legacy = try decoder.container(keyedBy: LegacyCodingKeys.self)
+            coordinateSystems = [CoordinateSystem(
+                id: Self.firstSystemID,
+                name: Self.defaultSystemName,
+                calibration: try legacy.decodeIfPresent(CalibrationMap.self,
+                                                        forKey: .calibration),
+                anchors: try legacy.decodeIfPresent(CalibrationAnchors.self,
+                                                    forKey: .calibrationAnchors))]
+            activeCoordinateSystemID = Self.firstSystemID
+            // Without this the curves would have no owner and a three-system
+            // project could never be built by opening one — but more to the
+            // point, leaving them all nil would make the first save from here
+            // ambiguous about a project that was never ambiguous before.
+            for index in lines.indices where lines[index].calibrationID == nil {
+                lines[index].calibrationID = Self.firstSystemID
+            }
+        }
+
+        // A stale or absent pointer reads as the first system, so a file whose
+        // active system was deleted still opens onto something.
+        let all = coordinateSystems ?? []
+        if !all.contains(where: { $0.id == activeCoordinateSystemID }) {
+            activeCoordinateSystemID = all.first?.id
+        }
+    }
+
+    public var systems: [CoordinateSystem] { coordinateSystems ?? [] }
+
+    /// The system the tools act on, or nil only for a file that names none.
+    public var activeSystem: CoordinateSystem? {
+        let all = systems
+        guard !all.isEmpty else { return nil }
+        if let match = all.first(where: { $0.id == activeCoordinateSystemID }) { return match }
+        return all.first
+    }
+
+    public var activeSystemIndex: Int? {
+        guard let id = activeSystem?.id else { return nil }
+        return systems.firstIndex { $0.id == id }
+    }
+
+    public var activeCalibration: CalibrationMap? { activeSystem?.calibration }
+
+    /// The active system's mapping — **for the screen, not for arithmetic**.
+    ///
+    /// The canvas draws the axes of the system being worked on, so this is what
+    /// it wants, and for a single-system project it is the whole story. Anything
+    /// that converts a *curve's* points — export, the data table, the data view —
+    /// must ask `calibration(for:)` instead: on a multi-subplot image a curve two
+    /// panels away has a completely different mapping, and converting it with
+    /// this one produces numbers that look right and are wrong by orders of
+    /// magnitude. Because selecting a curve also makes its system active, the two
+    /// agree for the curve in hand — which is exactly why the mistake would go
+    /// unnoticed.
+    ///
+    /// Settable, and the setter writes the **active** system. Get and set have to
+    /// mean the same thing or a caller that reads-then-writes would silently
+    /// retarget a different system; and every writer before FR-13 meant "the
+    /// project's calibration", which with one system is the same thing.
+    public var calibration: CalibrationMap? {
+        get { activeCalibration }
+        set {
+            guard let index = activeSystemIndex else { return }
+            coordinateSystems?[index].calibration = newValue
+        }
+    }
+
+    /// The active system's anchors, for the draggable markers. Writes the active
+    /// system, for the same reason as above; nil clears them.
+    public var calibrationAnchors: CalibrationAnchors? {
+        get { activeSystem?.anchors }
+        set {
+            guard let index = activeSystemIndex else { return }
+            coordinateSystems?[index].anchors = newValue
+        }
+    }
+
+    /// Whether **every** system has a mapping.
+    ///
+    /// What the status line reports. With three systems, "标定完成" while one is
+    /// still uncalibrated would be a claim the next export contradicts — and the
+    /// status line is the only place that claim is made.
+    public var isFullyCalibrated: Bool {
+        let all = systems
+        return !all.isEmpty && all.allSatisfy(\.isCalibrated)
+    }
+
+    /// 1-based position of a system, for menus and the status line.
+    public func ordinal(ofSystem id: UUID) -> Int? {
+        systems.firstIndex { $0.id == id }.map { $0 + 1 }
+    }
+
+    /// The mapping that converts a curve's pixels, or nil when it has none.
+    ///
+    /// Nil happens for a curve whose system was deleted out from under it — which
+    /// `removeCoordinateSystem` refuses to do — and for a system declared but not
+    /// yet calibrated. Both mean "these points have no numeric reading yet",
+    /// which the exporters report as `calibrationMissing` rather than inventing
+    /// one from a neighbouring panel.
+    public func calibration(for line: CurveLine) -> CalibrationMap? {
+        calibration(forSystem: line.calibrationID)
+    }
+
+    public func calibration(forLineID id: UUID?) -> CalibrationMap? {
+        guard let id, let line = lines.first(where: { $0.id == id }) else {
+            return activeCalibration
+        }
+        return calibration(for: line)
+    }
+
+    public func calibration(forSystem id: UUID?) -> CalibrationMap? {
+        guard let id else { return nil }
+        return systems.first { $0.id == id }?.calibration
+    }
+
+    /// The curves measured in a given system.
+    public func curves(usingSystem id: UUID) -> [CurveLine] {
+        lines.filter { $0.calibrationID == id }
     }
 
     // MARK: - Calibration
@@ -272,6 +539,10 @@ public struct ProjectState: Equatable, Codable, Sendable {
     /// itself is built by `CalibrationMap.init(anchors:)`, which takes each axis
     /// from its own pair — so a point clicked slightly off-axis still calibrates
     /// correctly, and direction follows whichever way the user drew the axis.
+    ///
+    /// Retargeted onto the **active** system by FR-13. The first calibration of a
+    /// project lands on the system every new project starts with, so the
+    /// single-system flow is unchanged from the user's side.
     @discardableResult
     public mutating func applyCalibration(anchors: CalibrationAnchors,
                                           xStartValue: Double,
@@ -285,25 +556,114 @@ public struct ProjectState: Equatable, Codable, Sendable {
                                  yStartValue: yStartValue, yEndValue: yEndValue,
                                  xIsLogarithmic: xIsLogarithmic,
                                  yIsLogarithmic: yIsLogarithmic)
-        calibration = map
-        calibrationAnchors = anchors
+        guard let index = activeSystemIndex else {
+            coordinateSystems = [CoordinateSystem(id: Self.firstSystemID,
+                                                  name: Self.defaultSystemName,
+                                                  calibration: map,
+                                                  anchors: anchors)]
+            activeCoordinateSystemID = Self.firstSystemID
+            return map
+        }
+        coordinateSystems?[index].calibration = map
+        coordinateSystems?[index].anchors = anchors
         return map
     }
 
-    /// Replaces the mapping while leaving the clicked anchors where they are.
+    /// Replaces the active system's mapping while leaving the clicked anchors
+    /// where they are.
     ///
     /// This is the edit-the-numbers path: the user is correcting a value, not
     /// re-tracing an axis, so the four markers must not move. Going through
     /// `applyCalibration` instead would rebuild the anchors from whatever pixels
     /// were passed and lose the ones on screen.
     public mutating func installCalibration(_ map: CalibrationMap) {
-        calibration = map
+        guard let index = activeSystemIndex else { return }
+        coordinateSystems?[index].calibration = map
     }
 
-    /// Drops the calibration and its display anchors, keeping extracted points.
+    /// Moves the active system's anchors without touching its mapping.
+    ///
+    /// The drag-a-handle path: the user is correcting where an axis was traced,
+    /// so the four markers follow the pointer while the numbers stay put. Split
+    /// from `installCalibration` so neither call site has to reach into
+    /// `coordinateSystems` and index it by hand.
+    public mutating func installAnchors(_ anchors: CalibrationAnchors) {
+        guard let index = activeSystemIndex else { return }
+        coordinateSystems?[index].anchors = anchors
+    }
+
+    /// Drops the active system's mapping and its display anchors, keeping
+    /// extracted points — they are stored in pixel space and stay valid.
+    ///
+    /// The system itself stays: it may own curves, and deleting it here would
+    /// silently strand them.
     public mutating func clearCalibration() {
-        calibration = nil
-        calibrationAnchors = nil
+        guard let index = activeSystemIndex else { return }
+        coordinateSystems?[index].calibration = nil
+        coordinateSystems?[index].anchors = nil
+    }
+
+    /// Replaces every system with one fresh, uncalibrated one — what loading a
+    /// new image means.
+    ///
+    /// One system rather than none, for the same reason `init` makes one: the
+    /// invariant "every curve has an owner" has to hold from the first curve.
+    public mutating func resetCoordinateSystems() {
+        coordinateSystems = [CoordinateSystem(id: Self.firstSystemID,
+                                              name: Self.defaultSystemName)]
+        activeCoordinateSystemID = Self.firstSystemID
+    }
+
+    /// Adds a system and makes it active. New curves join it; existing ones stay
+    /// where they are until the user says otherwise.
+    @discardableResult
+    public mutating func addCoordinateSystem(name: String? = nil) -> UUID {
+        let system = CoordinateSystem(name: name ?? "坐标系 \(systems.count + 1)")
+        coordinateSystems = systems + [system]
+        activeCoordinateSystemID = system.id
+        return system.id
+    }
+
+    public mutating func setActiveCoordinateSystem(id: UUID) {
+        guard systems.contains(where: { $0.id == id }) else { return }
+        activeCoordinateSystemID = id
+    }
+
+    public mutating func renameCoordinateSystem(id: UUID, to name: String) {
+        guard let index = systems.firstIndex(where: { $0.id == id }) else { return }
+        coordinateSystems?[index].name = name
+    }
+
+    /// Moves a curve into a system.
+    ///
+    /// Returns false for an unknown curve or system, so a caller cannot leave a
+    /// curve pointing at nothing.
+    @discardableResult
+    public mutating func assign(curveID: UUID, toSystem systemID: UUID) -> Bool {
+        guard systems.contains(where: { $0.id == systemID }),
+              let index = lines.firstIndex(where: { $0.id == curveID }) else { return false }
+        lines[index].calibrationID = systemID
+        return true
+    }
+
+    /// Removes a system, unless it is the last one or curves are still in it.
+    ///
+    /// **Both refusals are deliberate.** Deleting the last system would leave
+    /// curves with no owner, and every conversion would have to invent one.
+    /// Deleting one that owns curves would silently re-measure those curves in a
+    /// different coordinate system — the exact failure this feature exists to
+    /// prevent, and one that leaves no trace: the points do not move, only their
+    /// meaning does. The caller asks `curves(usingSystem:)` first so it can say
+    /// how many and which.
+    @discardableResult
+    public mutating func removeCoordinateSystem(id: UUID) -> Bool {
+        guard systems.count > 1, systems.contains(where: { $0.id == id }),
+              curves(usingSystem: id).isEmpty else { return false }
+        coordinateSystems = systems.filter { $0.id != id }
+        if activeCoordinateSystemID == id {
+            activeCoordinateSystemID = coordinateSystems?.first?.id
+        }
+        return true
     }
 
     // MARK: - Lines
@@ -319,13 +679,16 @@ public struct ProjectState: Equatable, Codable, Sendable {
     }
 
     /// Creates a curve. It inherits the image's background so it is immediately
-    /// usable once its own colour is sampled.
+    /// usable once its own colour is sampled, and the **active** coordinate
+    /// system — so a curve drawn while panel (b) is being worked on is measured
+    /// in panel (b), without the user having to say so afterwards.
     @discardableResult
     public mutating func addLine(name: String? = nil, color: RGB8) -> UUID {
         let line = CurveLine(name: name ?? "曲线 \(lines.count + 1)",
                              color: color,
                              backgroundColor: defaultBackgroundColor,
-                             colorTolerance: defaultColorTolerance)
+                             colorTolerance: defaultColorTolerance,
+                             calibrationID: activeSystem?.id)
         lines.append(line)
         activeLineID = line.id
         return line.id

@@ -735,8 +735,11 @@ final class CanvasView: NSView {
         //
         // A project file does not come through here: `load(project:)` installs the
         // state whole, calibration included.
-        state.calibration = nil
-        state.calibrationAnchors = nil
+        //
+        // Every system goes, not just the active one: they are all anchored to
+        // the picture that just went away, so keeping any of them leaves the new
+        // chart labelled with the old one's axes.
+        state.resetCoordinateSystems()
         // The snapshots describe a chart that is no longer on screen. Restoring
         // one would put points back onto a different picture, at coordinates that
         // meant something in the old one.
@@ -1001,8 +1004,86 @@ final class CanvasView: NSView {
     /// taking back nothing the user meant to take back.
     func selectLine(id: UUID) {
         state.activeLineID = id
+        // Selecting a curve also selects its coordinate system. This is the
+        // first of the three conventions FR-13 had to settle, and it is what
+        // makes the rest of the window agree: the axes drawn brightest, the
+        // handles the user can drag, the numbers in the point table and whatever
+        // 「标定坐标系」 would overwrite are all "the active system", so selecting
+        // curve (b) has to make (b) active or every one of them lies.
+        if let systemID = state.lines.first(where: { $0.id == id })?.calibrationID {
+            state.setActiveCoordinateSystem(id: systemID)
+        }
         needsDisplay = true
         delegate?.canvasDidChangeState(self)
+    }
+
+    // MARK: - Coordinate systems (FR-13)
+
+    /// Adds a coordinate system and makes it the active one.
+    ///
+    /// Existing curves stay where they are. The new system is for the next curve
+    /// — and for the next four clicks on 「标定坐标系」 — which is the whole point:
+    /// the user adds it *because* the next panel has different axes.
+    @discardableResult
+    func addCoordinateSystem() -> UUID {
+        var id = UUID()
+        perform("新增坐标系") { id = $0.addCoordinateSystem() }
+        needsDisplay = true
+        delegate?.canvasDidChangeState(self)
+        return id
+    }
+
+    /// Why a coordinate system cannot be deleted.
+    enum RemovalRefusal {
+        case lastOne
+        case ownsCurves(count: Int)
+    }
+
+    /// Whether deleting this system is allowed, and why not when it is not.
+    ///
+    /// Deleting one that owns curves would silently re-measure those curves in
+    /// some other system — the exact failure FR-13 exists to prevent, and one
+    /// that leaves no trace, because the points do not move and only their
+    /// meaning does.
+    func refusalForRemovingCoordinateSystem(id: UUID) -> RemovalRefusal? {
+        guard state.systems.count > 1 else { return .lastOne }
+        let owned = state.curves(usingSystem: id).count
+        return owned == 0 ? nil : .ownsCurves(count: owned)
+    }
+
+    @discardableResult
+    func removeCoordinateSystem(id: UUID) -> Bool {
+        guard refusalForRemovingCoordinateSystem(id: id) == nil else { return false }
+        var removed = false
+        perform("删除坐标系") { removed = $0.removeCoordinateSystem(id: id) }
+        needsDisplay = true
+        delegate?.canvasDidChangeState(self)
+        return removed
+    }
+
+    /// Makes a system the one the tools act on. Navigation, not an edit — the
+    /// axes on screen are all still there, and nothing about the data changed.
+    func selectCoordinateSystem(id: UUID) {
+        state.setActiveCoordinateSystem(id: id)
+        needsDisplay = true
+        delegate?.canvasDidChangeState(self)
+    }
+
+    /// Moves the selected curve into a system — for the curve that was extracted
+    /// before its panel's axes were traced, or one assigned to the wrong panel.
+    @discardableResult
+    func assignActiveLine(toSystem id: UUID) -> Bool {
+        guard let lineID = state.activeLineID else { return false }
+        var moved = false
+        perform("归入坐标系") { moved = $0.assign(curveID: lineID, toSystem: id) }
+        // The curve's new system becomes the active one, for the same reason
+        // selecting a curve does: everything the window shows follows the active
+        // system, and leaving it behind would show this curve's numbers in the
+        // units it just left.
+        if moved { state.setActiveCoordinateSystem(id: id) }
+        needsDisplay = true
+        delegate?.canvasDidChangeState(self)
+        return moved
     }
 
     func renameLine(id: UUID, to name: String) {
@@ -1452,8 +1533,8 @@ final class CanvasView: NSView {
             anchors.yEnd = imagePoint
         }
 
-        state.calibration = calibration
-        state.calibrationAnchors = anchors
+        state.installCalibration(calibration)
+        state.installAnchors(anchors)
         needsDisplay = true
         delegate?.canvasDidChangeState(self)
     }
@@ -1490,27 +1571,49 @@ final class CanvasView: NSView {
     }
 
     private func drawCalibrationOverlay() {
-        guard let calibration = state.calibration else { return }
-        drawRules(calibration)
-        drawTicks(calibration)
-        guard showsCalibrationHandles else { return }
+        let activeID = state.activeSystem?.id
+        // Every system's rules and ticks are drawn, because that is what having
+        // two of them means — both are axes on the same picture. The one being
+        // worked on is at full strength and the rest are dimmed, so "which am I
+        // calibrating right now" is answerable without opening a menu. With one
+        // system nothing is dimmed and this is exactly what it was before.
+        for system in state.systems {
+            guard let calibration = system.calibration else { continue }
+            let dimmed = system.id != activeID
+            drawRules(calibration, dimmed: dimmed)
+            drawTicks(calibration, dimmed: dimmed)
+        }
+        // Handles are drag targets, so only the active system gets them: a second
+        // set would be four more discs to aim between, sitting on the very data
+        // the first set is being used to read.
+        guard showsCalibrationHandles, let calibration = state.activeCalibration else { return }
         drawHandles(calibration)
     }
 
-    private func drawRules(_ calibration: CalibrationMap) {
+    /// How far an inactive coordinate system's overlay is faded.
+    ///
+    /// Not invisible. The other panels' axes are the reason the project has two
+    /// systems, and a user checking that panel (b)'s ticks land on (b)'s grid
+    // needs to see them.
+    private static let inactiveOverlayAlpha: CGFloat = 0.34
+
+    private func drawRules(_ calibration: CalibrationMap, dimmed: Bool = false) {
         // Each axis is its own segment. They need not share an end — that is the
         // whole reason for four anchors — so there is no common corner to draw
         // from any more.
         drawRule(from: handlePosition(.xStart, calibration),
-                 to: handlePosition(.xEnd, calibration), color: Self.xAxisColor)
+                 to: handlePosition(.xEnd, calibration),
+                 color: Self.xAxisColor, dimmed: dimmed)
         drawRule(from: handlePosition(.yStart, calibration),
-                 to: handlePosition(.yEnd, calibration), color: Self.yAxisColor)
+                 to: handlePosition(.yEnd, calibration),
+                 color: Self.yAxisColor, dimmed: dimmed)
     }
 
-    private func drawRule(from a: PixelPoint, to b: PixelPoint, color: NSColor) {
+    private func drawRule(from a: PixelPoint, to b: PixelPoint, color: NSColor,
+                          dimmed: Bool = false) {
         let p = transform.viewPoint(fromImage: a)
         let q = transform.viewPoint(fromImage: b)
-        color.withAlphaComponent(0.8).setStroke()
+        color.withAlphaComponent(dimmed ? Self.inactiveOverlayAlpha * 0.8 : 0.8).setStroke()
         let path = NSBezierPath()
         path.lineWidth = 1.5
         path.setLineDash([6, 4], count: 2, phase: 0)
@@ -1528,7 +1631,10 @@ final class CanvasView: NSView {
     /// A rule drawn slightly off-square, or one whose two ends sit at different
     /// heights, would otherwise have its ticks float away from the line they
     /// are supposed to mark.
-    private func drawTicks(_ calibration: CalibrationMap) {
+    private func drawTicks(_ calibration: CalibrationMap, dimmed: Bool = false) {
+        // One multiplier for every tick, so an inactive system's scale reads as
+        // faded rather than as a different kind of tick.
+        let fade = dimmed ? Self.inactiveOverlayAlpha : 1
         let xStart = handlePosition(.xStart, calibration)
         let xEnd = handlePosition(.xEnd, calibration)
         let yStart = handlePosition(.yStart, calibration)
@@ -1540,13 +1646,13 @@ final class CanvasView: NSView {
                                        startValue: xStart.y, endValue: xEnd.y)
             let v = transform.viewPoint(fromImage: PixelPoint(x: tick.pixel, y: row))
             let length: CGFloat = tick.isMajor ? 9 : 5
-            Self.xAxisColor.withAlphaComponent(tick.isMajor ? 0.95 : 0.55).setStroke()
+            Self.xAxisColor.withAlphaComponent((tick.isMajor ? 0.95 : 0.55) * fade).setStroke()
             let path = NSBezierPath()
             path.lineWidth = tick.isMajor ? 1.5 : 1
             path.move(to: CGPoint(x: v.x, y: v.y - length))
             path.line(to: CGPoint(x: v.x, y: v.y + length))
             path.stroke()
-            if tick.isMajor {
+            if tick.isMajor && !dimmed {
                 labelTick(trim(tick.value), at: CGPoint(x: v.x, y: v.y + 12),
                           color: Self.xAxisColor)
             }
@@ -1558,13 +1664,13 @@ final class CanvasView: NSView {
                                           startValue: yStart.x, endValue: yEnd.x)
             let v = transform.viewPoint(fromImage: PixelPoint(x: column, y: tick.pixel))
             let length: CGFloat = tick.isMajor ? 9 : 5
-            Self.yAxisColor.withAlphaComponent(tick.isMajor ? 0.95 : 0.55).setStroke()
+            Self.yAxisColor.withAlphaComponent((tick.isMajor ? 0.95 : 0.55) * fade).setStroke()
             let path = NSBezierPath()
             path.lineWidth = tick.isMajor ? 1.5 : 1
             path.move(to: CGPoint(x: v.x - length, y: v.y))
             path.line(to: CGPoint(x: v.x + length, y: v.y))
             path.stroke()
-            if tick.isMajor {
+            if tick.isMajor && !dimmed {
                 let text = trim(tick.value)
                 let attributes: [NSAttributedString.Key: Any] = [
                     .font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .medium),

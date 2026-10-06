@@ -31,21 +31,30 @@ public enum XLSXWriter {
     /// - Throws: `ExportError.noPoints` when there is nothing to write, so the
     ///   caller reports the same sentence the other formats do rather than saving
     ///   an empty workbook that looks like a success.
+    /// - Parameters:
+    ///   - calibration: mapping used for every curve — right only for a project
+    ///     whose curves share one coordinate system.
+    ///   - resolver: which mapping each curve is measured in, for a project with
+    ///     several (FR-13). Authoritative when supplied: one curve per sheet,
+    ///     each in its own system, and a curve with none fails rather than
+    ///     borrowing another panel's numbers.
     public static func data(for lines: [CurveLine],
                             calibration: CalibrationMap?,
+                            resolvingWith resolver: CalibrationResolver? = nil,
                             modified: Date = Date()) throws -> Data {
         let populated = lines.filter { !$0.points.isEmpty }
         guard !populated.isEmpty else { throw ExportError.noPoints }
 
-        // Every value goes through the calibration, so a project with no
+        // Every value goes through a calibration, so a project with no
         // coordinate system fails here rather than writing pixel counts that look
         // like data.
+        let mapFor = Exporter.map(for: calibration, resolver: resolver)
         var sheets: [(name: String, rows: [[String]])] = []
         for line in populated {
-            guard let calibration else { throw ExportError.calibrationMissing }
+            guard let map = mapFor(line) else { throw ExportError.calibrationMissing }
             var rows: [[String]] = [["x", "y"]]
             for point in line.orderedPoints {
-                let value = try calibration.data(fromPixel: point)
+                let value = try map.data(fromPixel: point)
                 rows.append([Exporter.decimal(value.x), Exporter.decimal(value.y)])
             }
             sheets.append((line.name, rows))

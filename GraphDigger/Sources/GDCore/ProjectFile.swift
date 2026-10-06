@@ -179,7 +179,15 @@ public enum ProjectFile {
     /// The layout version this build writes. Raise it only for a change an older
     /// reader could not tolerate; adding a field to the header is not one of
     /// those, provided the field is optional — see `ProjectHeader`.
-    public static let currentVersion = 1
+    ///
+    /// `2` since multi-coordinate-system projects (FR-13). An older build does
+    /// not merely fail to *see* the extra systems — it reads the whole thing as
+    /// one uncalibrated project, shows 「未标定」, and the first save from there
+    /// writes a single-system file over it. That is a silent loss of the other
+    /// panels' calibrations, and it is why the file is refused outright: an older
+    /// build answers `unsupportedVersion(2)` instead of quietly halving what the
+    /// user saved. Format v1 files still open and migrate on load.
+    public static let currentVersion = 2
 
     /// Magic (8) + version (4) + header length (4).
     public static let prologueLength = 16

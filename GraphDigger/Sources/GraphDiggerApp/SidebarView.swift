@@ -67,7 +67,17 @@ final class SidebarView: NSView {
 
     private var lines: [CurveLine] = []
     private var calibration: CalibrationMap?
+    /// Which mapping each curve is measured in — FR-13. Nil means "every curve
+    /// shares `calibration`", which is what every caller before multi-system
+    /// projects said, honestly.
+    private var calibrationFor: CalibrationResolver?
     private var activeID: UUID?
+
+    /// The mapping for one curve: its own when the caller knows which, the
+    /// project's single one otherwise.
+    private func calibration(for line: CurveLine) -> CalibrationMap? {
+        calibrationFor?(line) ?? calibration
+    }
 
     /// Set while `update` reasserts the selected row. Selecting a row posts a
     /// selection-changed notification, which the delegate answers by selecting
@@ -368,9 +378,11 @@ final class SidebarView: NSView {
     /// Rebuilds the panel from the project state. Cheap: the tables only build
     /// the rows that are on screen, so a curve of thousands of points costs the
     /// same as one of ten.
-    func update(lines: [CurveLine], calibration: CalibrationMap?, activeID: UUID?) {
+    func update(lines: [CurveLine], calibration: CalibrationMap?, activeID: UUID?,
+                resolvingWith resolver: CalibrationResolver? = nil) {
         self.lines = lines
         self.calibration = calibration
+        self.calibrationFor = resolver
         self.activeID = activeID
 
         curveTable.reloadData()
@@ -406,7 +418,12 @@ final class SidebarView: NSView {
         }
 
         let count = active?.points.count ?? 0
-        let calibrated = calibration != nil
+        // Asked per curve, not once for the panel: the panel shows the *selected*
+        // curve's points, and on a figure with several coordinate systems the
+        // selected curve may not be measured in the system the canvas is currently
+        // calibrating.
+        // Parenthesised on the right because `??` binds tighter than `!=`.
+        let calibrated = active.map { self.calibration(for: $0) != nil } ?? (calibration != nil)
         pointHeading.stringValue = hasActive
             ? "数据点 · \(count) 个\(calibrated ? "" : "(未标定,显示像素坐标)")"
             : "数据点"
@@ -485,9 +502,9 @@ extension SidebarView: NSTableViewDataSource {
         tableView === curveTable ? lines.count : (activeLinePoints?.count ?? 0)
     }
 
-    private var activeLinePoints: [PixelPoint]? {
-        lines.first { $0.id == activeID }?.orderedPoints
-    }
+    private var activeLine: CurveLine? { lines.first { $0.id == activeID } }
+
+    private var activeLinePoints: [PixelPoint]? { activeLine?.orderedPoints }
 }
 
 extension SidebarView: NSTableViewDelegate {
@@ -635,8 +652,8 @@ extension SidebarView: NSTableViewDelegate {
         case "index":
             return "\(row + 1)"
         default:
-            guard let calibration,
-                  let data = try? calibration.data(fromPixel: pixel) else {
+            guard let map = activeLine.map({ self.calibration(for: $0) }) ?? calibration,
+                  let data = try? map.data(fromPixel: pixel) else {
                 // Without a calibration the pixel coordinates are still useful —
                 // and honest about not being the chart's values.
                 return Self.number(identifier == "x" ? pixel.x : pixel.y)
