@@ -106,9 +106,6 @@ final class SidebarView: NSView {
     private var orderBox: CardView!
     private var curveButtonRow: NSView!
 
-    /// The 1pt rule down the panel's left edge, dividing it from the canvas.
-    private var edgeRule: NSView!
-
     private static let pointColumns = ["index", "x", "y"]
 
     override init(frame frameRect: NSRect) {
@@ -123,31 +120,25 @@ final class SidebarView: NSView {
 
     override var isFlipped: Bool { true }
 
-    /// The grey field the cards sit on.
-    static let panelColor = NSColor(calibratedWhite: 0.937, alpha: 1)
+    /// The grey field the cards sit on. Aliases of the design tokens — the
+    /// light values are the accepted ones, the dark answers live in `Design`,
+    /// and both are resolved at draw time (see `美学设计.md` §4.1).
+    static let panelColor = Design.panelField
     /// Tint of a card's title band, a step darker than the panel.
-    static let headerFill = NSColor(calibratedWhite: 0.886, alpha: 1)
+    static let headerFill = Design.cardHeader
     /// The Excel grid: three steps darker than a card body, which is what made
     /// the rules read as structure instead of floating on white.
-    static let gridColor = NSColor(calibratedWhite: 0.82, alpha: 1)
+    static let gridColor = Design.gridLine
     /// A card's outline. Not `separatorColor`: that is a mid grey tuned for
     /// hairlines on white, and against this panel it measured within a point of
     /// the panel itself, so the cards had no edge at all. The whole point of the
     /// field is that the white cards sit *on* something.
-    static let cardBorder = NSColor(calibratedWhite: 0.78, alpha: 1)
+    static let cardBorder = Design.cardBorder
 
     // MARK: - Construction
 
     private func build() {
         wantsLayer = true
-        layer?.backgroundColor = Self.panelColor.cgColor
-
-        // A rule down the left edge: without it the panel and the canvas below it
-        // were both window background and the boundary was invisible.
-        edgeRule = NSView()
-        edgeRule.wantsLayer = true
-        edgeRule.layer?.backgroundColor = NSColor.separatorColor.cgColor
-        addSubview(edgeRule)
 
         // ---- 曲线 card ----------------------------------------------------
         curveHeading = heading("曲线")
@@ -166,7 +157,7 @@ final class SidebarView: NSView {
         curveTable.addTableColumn(curveColumn)
         let curveScroll = scroll(around: curveTable)
 
-        curveEmptyLabel = PassthroughLabel(labelWithString: "还没有曲线。\n点下面的「新增曲线」,\n再用「取色」在图上取色。")
+        curveEmptyLabel = PassthroughLabel(labelWithString: "还没有曲线。\n点右上角的「＋」新增一条,\n再用「取色」在图上取色。")
         curveEmptyLabel.font = .systemFont(ofSize: 11)
         curveEmptyLabel.textColor = .tertiaryLabelColor
         curveEmptyLabel.lineBreakMode = .byWordWrapping
@@ -177,12 +168,13 @@ final class SidebarView: NSView {
 
         let curveBox = card(header: curveHeading,
                             body: [curveScroll, curveEmptyLabel], width: Self.pad * 2)
-        let addButton = NSButton(title: "新增曲线", target: self, action: #selector(addLineClicked(_:)))
-        addButton.bezelStyle = .rounded
-        addButton.font = .systemFont(ofSize: 11)
-        let removeButton = NSButton(title: "删除曲线", target: self, action: #selector(removeLineClicked(_:)))
-        removeButton.bezelStyle = .rounded
-        removeButton.font = .systemFont(ofSize: 11)
+        // Compact ＋/− in the card's title band, where every Mac list puts them —
+        // the full-width button row they replace was the loudest thing in the
+        // panel, for two actions taken a handful of times per project.
+        let addButton = Self.headerButton(symbol: "plus", toolTip: "新增曲线",
+                                          target: self, action: #selector(addLineClicked(_:)))
+        let removeButton = Self.headerButton(symbol: "minus", toolTip: "删除选中的曲线",
+                                             target: self, action: #selector(removeLineClicked(_:)))
         let buttons = NSView()
         buttons.addSubview(addButton)
         buttons.addSubview(removeButton)
@@ -261,6 +253,20 @@ final class SidebarView: NSView {
         self.removeButton = removeButton
     }
 
+    /// The panel field and the 1pt rule down its left edge, both resolved at
+    /// draw time. The field used to be a fixed 0.937 grey baked into the layer:
+    /// readable in light, and in dark mode a light frame around dark cards —
+    /// the exact inversion of what it is for. The rule separates the panel from
+    /// the canvas, which without it were two indistinguishable window-coloured
+    /// regions.
+    override func draw(_ dirtyRect: NSRect) {
+        Self.panelColor.setFill()
+        bounds.fill()
+        Design.hairline.setFill()
+        NSRect(x: 0, y: 0, width: 1, height: bounds.height).fill()
+        super.draw(dirtyRect)
+    }
+
     private static let pad: CGFloat = 8
 
     private func heading(_ text: String) -> NSTextField {
@@ -268,6 +274,21 @@ final class SidebarView: NSView {
         label.font = .systemFont(ofSize: 11, weight: .semibold)
         label.textColor = .labelColor
         return label
+    }
+
+    /// A borderless symbol button for a card's title band. Borderless because
+    /// the band already reads as a control surface; two more bezels inside it
+    /// would be chrome on chrome.
+    private static func headerButton(symbol: String, toolTip: String,
+                                     target: AnyObject, action: Selector) -> NSButton {
+        let button = NSButton(title: "", target: target, action: action)
+        button.isBordered = false
+        if #available(macOS 11.0, *) {
+            button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: toolTip)
+            button.imageScaling = .scaleProportionallyDown
+        }
+        button.toolTip = toolTip
+        return button
     }
 
     /// A section: a titled header band over a bordered body, the two separated
@@ -304,8 +325,6 @@ final class SidebarView: NSView {
         let w = bounds.width
         let inner = max(40, w - pad * 2)
 
-        edgeRule.frame = NSRect(x: 0, y: 0, width: 1, height: bounds.height)
-
         var y: CGFloat = 10
 
         // ---- 曲线 ---------------------------------------------------------
@@ -317,15 +336,19 @@ final class SidebarView: NSView {
                                 height: CardView.headerHeight + curveBody)
         let curveInner = curveBox.contentFrame
         curveScroll.frame = NSRect(x: curveInner.minX, y: curveInner.minY,
-                                   width: curveInner.width, height: curveBody - 34)
+                                   width: curveInner.width, height: curveInner.height)
         curveEmptyLabel.frame = NSRect(x: curveInner.minX + 4, y: curveInner.minY + 8,
                                        width: curveInner.width - 8, height: 60)
-        curveButtonRow.frame = NSRect(x: curveInner.minX,
-                                      y: curveInner.minY + curveBody - 30,
-                                      width: curveInner.width, height: 22)
-        let halfWidth = (curveInner.width - 8) / 2
-        addButton.frame = NSRect(x: 0, y: 0, width: halfWidth, height: 22)
-        removeButton.frame = NSRect(x: halfWidth + 8, y: 0, width: halfWidth, height: 22)
+        // The ＋/− pair lives in the title band, right-aligned, minus closest to
+        // the edge — the same corner and the same order Finder's sidebar uses.
+        let buttonSize: CGFloat = 16
+        let buttonY = (CardView.headerHeight - buttonSize) / 2
+        curveButtonRow.frame = NSRect(x: curveBox.bounds.width - buttonSize * 2 - 12,
+                                      y: buttonY, width: buttonSize * 2 + 4,
+                                      height: buttonSize)
+        addButton.frame = NSRect(x: 0, y: 0, width: buttonSize, height: buttonSize)
+        removeButton.frame = NSRect(x: buttonSize + 4, y: 0,
+                                    width: buttonSize, height: buttonSize)
         y += curveBox.frame.height + Self.gap
 
         // ---- 取点顺序 -----------------------------------------------------
@@ -743,23 +766,30 @@ private final class CardView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let header = NSRect(x: 0, y: 0, width: bounds.width, height: Self.headerHeight)
+        let radius = Design.cardRadius
+        let card = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5),
+                                xRadius: radius, yRadius: radius)
+
+        // Body first, then the title band clipped to the same outline so the
+        // band inherits the card's rounded top corners. Colours resolve at draw
+        // time — a card that froze them at build is the dark-mode bug this
+        // drawing replaced.
+        Design.cardBody.setFill()
+        card.fill()
+
+        NSGraphicsContext.saveGraphicsState()
+        card.addClip()
         SidebarView.headerFill.setFill()
-        header.fill()
-
-        NSColor.textBackgroundColor.setFill()
-        NSRect(x: 0, y: Self.headerHeight, width: bounds.width,
-               height: max(0, bounds.height - Self.headerHeight)).fill()
-
-        SidebarView.cardBorder.setStroke()
-        let outline = NSBezierPath(rect: bounds.insetBy(dx: 0.5, dy: 0.5))
-        outline.lineWidth = 1
-        outline.stroke()
-
+        NSRect(x: 0, y: 0, width: bounds.width, height: Self.headerHeight).fill()
         // The line under the title band, drawn from the same colour as the grid
         // so a card's header reads as its first row.
         SidebarView.gridColor.setFill()
         NSRect(x: 0, y: Self.headerHeight - 1, width: bounds.width, height: 1).fill()
+        NSGraphicsContext.restoreGraphicsState()
+
+        SidebarView.cardBorder.setStroke()
+        card.lineWidth = 1
+        card.stroke()
     }
 }
 

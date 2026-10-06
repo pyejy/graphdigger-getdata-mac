@@ -1117,6 +1117,10 @@ enum SelfTest {
         let tint = sidebarPanelIsTinted()
         check("面板底色与画布区分开(不再是一片纯白)", tint.passed, tint.detail)
 
+        let chrome = chromeFollowsAppearance()
+        check("工具栏与信息条背景跟随深浅外观(不再固化在启动时的外观)",
+              chrome.passed, chrome.detail)
+
         print(String(repeating: "─", count: 62))
         if failures == 0 {
             print("全部通过。")
@@ -4662,7 +4666,93 @@ enum SelfTest {
 
         let detail = String(format: "底色 %.3f · 卡片 %.3f · 标题 %.3f · 边框 %.3f",
                             field, body, header, seam)
-        return (fieldIsGrey && bodyIsWhite && headerIsDarker && seamIsDrawn, detail)
+
+        // The same panel under darkAqua must not be the light panel with dark
+        // tables dropped in: the field, the header band and the card outline
+        // were all fixed greys once, which read as a light frame around black
+        // cards. Dark layering runs the other way — the body sinks, the field
+        // and the header band float — so the assertions are ordered, not
+        // absolute: body darkest, then field, then header, with a visible edge.
+        sidebar.appearance = NSAppearance(named: .darkAqua)
+        sidebar.needsDisplay = true
+        sidebar.displayIfNeeded()
+        guard let darkRep = sidebar.bitmapImageRepForCachingDisplay(in: sidebar.bounds)
+        else { return (false, "无法渲染深色面板") }
+        sidebar.cacheDisplay(in: sidebar.bounds, to: darkRep)
+
+        let dsx = CGFloat(darkRep.pixelsWide) / sidebar.bounds.width
+        let dsy = CGFloat(darkRep.pixelsHigh) / sidebar.bounds.height
+        func darkLevel(_ x: Double, _ y: Double) -> Double? {
+            let px = Int((x * dsx).rounded()), py = Int((y * dsy).rounded())
+            guard px >= 0, px < darkRep.pixelsWide, py >= 0, py < darkRep.pixelsHigh,
+                  let c = darkRep.colorAt(x: px, y: py) else { return nil }
+            return (Double(c.redComponent) + Double(c.greenComponent) + Double(c.blueComponent)) / 3
+        }
+        guard let dField = darkLevel(card.minX - 4, card.midY),
+              let dBody = darkLevel(card.minX + 3, card.midY),
+              let dHeader = darkLevel(card.midX, card.minY + 10) else {
+            return (false, "取不到深色面板像素")
+        }
+        var dSeam: Double?
+        x = card.minX - 4
+        while x <= card.minX + 4 {
+            if let v = darkLevel(x, card.midY) { dSeam = max(dSeam ?? v, v) }
+            x += 0.25
+        }
+        guard let dSeam else { return (false, "取不到深色卡片边框") }
+        sidebar.appearance = nil
+
+        let darkIsDark = dField < 0.5 && dBody < 0.5 && dHeader < 0.5
+        let darkLayers = dBody < dField && dHeader > dBody
+        let darkSeamDrawn = dSeam >= max(dField, dBody) + 0.05
+        let lightOK = fieldIsGrey && bodyIsWhite && headerIsDarker && seamIsDrawn
+        let darkOK = darkIsDark && darkLayers && darkSeamDrawn
+        let darkDetail = String(format: "深色: 底色 %.3f · 卡片 %.3f · 标题 %.3f · 边框 %.3f",
+                                dField, dBody, dHeader, dSeam)
+        return (lightOK && darkOK, detail + " · " + darkDetail)
+    }
+
+    /// The toolbar and the info bar must read as window chrome in *both*
+    /// appearances. Each once captured `windowBackgroundColor` into a `CGColor`
+    /// at build time — frozen at whatever the system started in, so under dark
+    /// mode the bars stayed light while their (adaptive) text went light too,
+    /// and the strip read as blank paper. The bars draw their fill now, so the
+    /// pixels are probed under both appearances: bright under aqua, dark under
+    /// darkAqua, and never the same.
+    private static func chromeFollowsAppearance() -> (passed: Bool, detail: String) {
+        func background(of view: NSView, under name: NSAppearance.Name) -> Double? {
+            view.appearance = NSAppearance(named: name)
+            view.needsDisplay = true
+            view.layoutSubtreeIfNeeded()
+            view.displayIfNeeded()
+            guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+                return nil
+            }
+            view.cacheDisplay(in: view.bounds, to: rep)
+            let sx = CGFloat(rep.pixelsWide) / view.bounds.width
+            let sy = CGFloat(rep.pixelsHigh) / view.bounds.height
+            // The far right end: past every button and label, pure background.
+            let px = Int(((view.bounds.width - 12) * sx).rounded())
+            let py = Int((view.bounds.midY * sy).rounded())
+            guard let c = rep.colorAt(x: px, y: py) else { return nil }
+            return (Double(c.redComponent) + Double(c.greenComponent) + Double(c.blueComponent)) / 3
+        }
+
+        var values: [(String, Double, Double)] = []
+        for (name, view) in [("工具栏", ToolbarView(frame: NSRect(x: 0, y: 0, width: 1_300,
+                                                                  height: 52)) as NSView),
+                             ("信息条", InfoBarView(frame: NSRect(x: 0, y: 0, width: 1_300,
+                                                                  height: 52)))] {
+            guard let light = background(of: view, under: .aqua),
+                  let dark = background(of: view, under: .darkAqua) else {
+                return (false, "\(name)渲染不出来")
+            }
+            values.append((name, light, dark))
+        }
+        let passed = values.allSatisfy { $0.1 > 0.8 && $0.2 < 0.5 }
+        let detail = values.map { "\($0.0) 浅 \(String(format: "%.3f", $0.1)) · 深 \(String(format: "%.3f", $0.2))" }
+            .joined(separator: "; ")
+        return (passed, detail)
     }
 
     /// "Excel-style", as the user put it: every row separated by a rule and every

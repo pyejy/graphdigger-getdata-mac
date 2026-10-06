@@ -137,11 +137,20 @@ final class ToolbarView: NSView {
 
     override var isFlipped: Bool { true }
 
+    /// The background is filled at draw time, not captured at build time: a
+    /// `CGColor` taken once is the appearance the app *started* in, frozen —
+    /// which is how this bar used to stay light in dark mode. `Design.chrome`
+    /// resolves against the appearance in force at the moment of drawing.
+    override func draw(_ dirtyRect: NSRect) {
+        Design.chrome.setFill()
+        bounds.fill()
+        super.draw(dirtyRect)
+    }
+
     // MARK: - Construction
 
     private func build() {
         wantsLayer = true
-        layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
 
         var x: CGFloat = Self.leadingMargin
 
@@ -497,7 +506,6 @@ final class InfoBarView: NSView {
 
     private func build() {
         wantsLayer = true
-        layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
 
         stepLabel = PassthroughLabel(labelWithString: "")
         stepLabel.font = .systemFont(ofSize: 12, weight: .medium)
@@ -516,7 +524,6 @@ final class InfoBarView: NSView {
         addSubview(lineLabel)
 
         buildParameterControl()
-        addRule()
         layoutTextRows()
     }
 
@@ -561,15 +568,20 @@ final class InfoBarView: NSView {
         addSubview(parameterLabel)
     }
 
-    /// A hairline along the bottom edge, so the strip reads as chrome above the
-    /// canvas rather than as part of it.
-    private func addRule() {
-        let rule = NSView()
-        rule.wantsLayer = true
-        rule.layer?.backgroundColor = NSColor.separatorColor.cgColor
-        rule.frame = NSRect(x: 0, y: 0, width: bounds.width, height: 1)
-        rule.autoresizingMask = [.width, .minYMargin]
-        addSubview(rule)
+    /// The strip's own drawing: the chrome fill and the hairline over the
+    /// canvas, both resolved at draw time. The fill used to be a `CGColor`
+    /// captured once at build — frozen at the startup appearance, which is how
+    /// the bar stayed light (and its adaptive text unreadable) in dark mode.
+    ///
+    /// The hairline is at the top edge (this view is flipped, so y = 0 is the
+    /// top): it separates the strip from the button row, where it has always
+    /// been drawn.
+    override func draw(_ dirtyRect: NSRect) {
+        Design.chrome.setFill()
+        bounds.fill()
+        Design.hairline.setFill()
+        NSRect(x: 0, y: 0, width: bounds.width, height: 1).fill()
+        super.draw(dirtyRect)
     }
 
     /// Width reserved on the right of the first row for the data summary.
