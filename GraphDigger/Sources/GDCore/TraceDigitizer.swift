@@ -25,6 +25,25 @@ public enum TraceDigitizer {
         public var divergenceDepth: Double = 3.0
         /// Widest deviation from the heading still accepted as "forward".
         public var forwardFanDegrees: Double = 70.0
+        /// How far the seed step looks along each candidate direction when
+        /// deciding which way the line runs. Only used once per trace.
+        public var seedLookaheadPixels: Int = 12
+        /// The angle the fan is widened to when the ordinary fan finds nothing
+        /// ahead. A right angle, plus a margin.
+        ///
+        /// The margin is not slack: candidate steps are quantised to eight
+        /// directions, and the heading is smoothed over the trailing thirteen
+        /// points, so a genuine 90° turn can present as 90–100° off the heading.
+        /// Measured at a rasterised corner: the only unvisited cells were exactly
+        /// perpendicular (90°), and at a wave's turning point the skewed heading
+        /// pushed the one continuation to 95°. Both were missed at 89°.
+        ///
+        /// Widening this far costs nothing elsewhere: the pool of near-equally
+        /// aligned cells is still limited to `fanSlack` (35°) of the best
+        /// candidate, so whenever there *is* a cell straight ahead — which is
+        /// always the case along a line, and at a crossing — the side and
+        /// perpendicular cells are excluded before this limit is consulted.
+        public var widenedForwardFanDegrees: Double = 100.0
         /// Safety valve against pathological masks.
         public var maxPoints: Int = 200_000
 
@@ -61,6 +80,7 @@ public enum TraceDigitizer {
         var farNeg: (depth: Int, offset: Double)? = nil
 
         let fanLimit = options.forwardFanDegrees * .pi / 180.0
+        let widenedFanLimit = max(fanLimit, options.widenedForwardFanDegrees * .pi / 180.0)
         let fanSlack = 35.0 * .pi / 180.0
         let lateralLimit = options.minLateral
 
@@ -85,98 +105,158 @@ public enum TraceDigitizer {
             }
         }
 
+        /// The first step, chosen by which way the ink actually runs.
+        ///
+        /// This used to be "the right-hand neighbour with the smallest |dy|",
+        /// which is right for the ordinary case — a mostly horizontal curve read
+        /// left to right — and wrong for a steep one. There the step it picks is
+        /// nearly *perpendicular* to the line, and because the heading is
+        /// initialised from that step, the ±`forwardFanDegrees` fan could never
+        /// afterwards accept the direction the line really goes in. Measured on a
+        /// vertical wave: seeded where the line is steep the walk took **4**
+        /// points and reported "reached the end"; the same curve seeded where it
+        /// is flat took 627.
+        ///
+        /// Support is counted along each candidate's own direction, so a cell
+        /// that is part of a long run beats one that merely happens to be
+        /// foreground. `visited` is deliberately not consulted — the lookahead is
+        /// about where the ink goes, not about where the walk has been. Ties go
+        /// to the rightward candidate, which keeps the old behaviour on a blob
+        /// where every direction looks alike.
+        func seedStep(from x: Int, y: Int, candidates: [Int]) -> Int? {
+            var best: Int? = nil
+            var bestScore = -Double.infinity
+            for idx in candidates {
+                let qx = idx % w, qy = idx / w
+                let dx = Double(qx - x), dy = Double(qy - y)
+                let length = (dx * dx + dy * dy).squareRoot()
+                guard length > 0 else { continue }
+                let ux = dx / length, uy = dy / length
+                var support = 0
+                for k in 1...max(1, options.seedLookaheadPixels) {
+                    let fx = Int((Double(x) + ux * Double(k)).rounded(.toNearestOrEven))
+                    let fy = Int((Double(y) + uy * Double(k)).rounded(.toNearestOrEven))
+                    guard fx >= 0, fx < w, fy >= 0, fy < h else { break }
+                    if mask.bits[fy * w + fx] { support += 1 }
+                }
+                let score = Double(support) + (qx > x ? 0.5 : 0)
+                if score > bestScore { bestScore = score; best = idx }
+            }
+            return best
+        }
+
+        /// The best candidate within `limit` of the current heading, or nil when
+        /// there is none. Best is the least-turning, and among those within
+        /// `fanSlack` of it the farthest forward.
+        func forwardStep(within limit: Double) -> Int? {
+            guard let head = heading else { return nil }
+            var scored: [(Double, Int)] = []
+            scored.reserveCapacity(candidates.count)
+            for idx in candidates {
+                let qx = idx % w, qy = idx / w
+                let ang = norm(atan2(Double(qy - curY), Double(qx - curX)) - head)
+                scored.append((abs(ang), idx))
+            }
+            scored.sort { $0.0 < $1.0 }
+            let forward = scored.filter { $0.0 <= limit }
+            guard !forward.isEmpty else { return nil }
+            let bestD = forward[0].0
+            // Only near-equally-aligned cells. This is what keeps a perpendicular
+            // neighbour — the line's own thickness — out of the pool whenever
+            // there is a cell straight ahead, which is what makes a wide `limit`
+            // safe to offer at all.
+            let pool = forward.filter { $0.0 <= bestD + fanSlack }
+            let ux = cos(head), uy = sin(head)
+            var bestProjection = -Double.infinity
+            var bestIdx = pool[0].1
+            for (_, idx) in pool {
+                let qx = idx % w, qy = idx / w
+                let proj = Double(qx - curX) * ux + Double(qy - curY) * uy
+                if proj > bestProjection { bestProjection = proj; bestIdx = idx }
+            }
+            return bestIdx
+        }
+
+        /// Where the walk can resume after a blank stretch, along or near the
+        /// current heading. Nil when there is nothing to jump to.
+        func bridgeLanding(from hd0: Double) -> (distance: Double, idx: Int)? {
+            var landing: (distance: Double, idx: Int)? = nil
+            for offsetDeg in [0.0, 8.0, -8.0] {
+                let hd = hd0 + offsetDeg * .pi / 180.0
+                let rx = cos(hd), ry = sin(hd)
+                var bestDistance: Double? = nil
+                var bestIdx: Int? = nil
+                for k10 in 10...((options.bridgePixels + 1) * 10 - 1) {
+                    let k = Double(k10) / 10.0
+                    let fx = Int((Double(curX) + rx * k).rounded(.toNearestOrEven))
+                    let fy = Int((Double(curY) + ry * k).rounded(.toNearestOrEven))
+                    guard fx >= 0, fx < w, fy >= 0, fy < h else { continue }
+                    let idx = fy * w + fx
+                    if visited[idx] || !mask.bits[idx] { continue }
+                    let ang = abs(norm(atan2(Double(fy - curY), Double(fx - curX)) - hd0))
+                    guard ang <= 45.0 * .pi / 180.0 else { continue }
+                    let d = (Double(fx - curX) * Double(fx - curX)
+                             + Double(fy - curY) * Double(fy - curY)).squareRoot()
+                    if bestDistance == nil || d < bestDistance! {
+                        bestDistance = d; bestIdx = idx
+                    }
+                }
+                if let bd = bestDistance, let bi = bestIdx,
+                   landing == nil || bd < landing!.distance {
+                    landing = (bd, bi)
+                }
+            }
+            return landing
+        }
+
         var candidates: [Int] = []
         candidates.reserveCapacity(8)
 
         while points.count < options.maxPoints {
-            let ux: Double = heading.map { cos($0) } ?? 1.0
-            let uy: Double = heading.map { sin($0) } ?? 0.0
-
             freeNeighbors(curX, curY, into: &candidates)
 
+            // Three ways to take a step, in order of how much each presumes.
+            //
+            //   1. the ordinary fan — the line continues roughly as it has been;
+            //   2. a gap jump along the heading — a dashed or broken curve;
+            //   3. a widened fan — nothing ahead and nothing to jump to, so the
+            //      missing step is a **turn**, not the end of the line.
+            //
+            // (3) is what the old code lacked. It read every turn wider than
+            // `forwardFanDegrees` as the end, so a corner ended the trace, and a
+            // steep start — where the first step lands on the line's own
+            // thickness rather than along it — looked like a four-point line.
+            //
+            // It cannot turn a real end into a continuation: at the tip of a line
+            // the cells ahead are background, so there is nothing for a wider fan
+            // to find. And it cannot hijack a crossing, because there the ordinary
+            // fan already finds the straight-ahead continuation and takes it,
+            // leaving the profile scan to report the junction as before.
             var chosen: Int? = nil
-
             if heading == nil {
-                // Seed direction: prefer rightward travel, else whatever exists.
-                var best: Int? = nil
-                var bestDY = Int.max
-                for idx in candidates {
-                    let qx = idx % w, qy = idx / w
-                    guard qx > curX else { continue }
-                    let dy = abs(qy - curY)
-                    if dy < bestDY { bestDY = dy; best = idx }
-                }
-                if best == nil {
-                    for idx in candidates {
-                        let qy = idx / w
-                        let dy = abs(qy - curY)
-                        if dy < bestDY { bestDY = dy; best = idx }
-                    }
-                }
-                chosen = best
+                chosen = seedStep(from: curX, y: curY, candidates: candidates)
             } else {
-                var scored: [(Double, Int)] = []
-                scored.reserveCapacity(candidates.count)
-                for idx in candidates {
-                    let qx = idx % w, qy = idx / w
-                    let ang = norm(atan2(Double(qy - curY), Double(qx - curX)) - heading!)
-                    scored.append((abs(ang), idx))
-                }
-                scored.sort { $0.0 < $1.0 }
-                let forward = scored.filter { $0.0 <= fanLimit }
-                if !forward.isEmpty {
-                    let bestD = forward[0].0
-                    var pool = forward.filter { $0.0 <= bestD + fanSlack }
-                    // Among near-equally-aligned cells take the most forward one.
-                    var bestProjection = -Double.infinity
-                    var bestIdx = pool[0].1
-                    for (_, idx) in pool {
-                        let qx = idx % w, qy = idx / w
-                        let proj = Double(qx - curX) * ux + Double(qy - curY) * uy
-                        if proj > bestProjection { bestProjection = proj; bestIdx = idx }
-                    }
-                    pool.removeAll(keepingCapacity: false)
-                    chosen = bestIdx
-                }
+                chosen = forwardStep(within: fanLimit)
             }
 
-            guard let nextIdx = chosen else {
-                // Dead end: try to bridge a dash along (or near) the heading.
-                var landing: (distance: Double, idx: Int)? = nil
-                if let hd0 = heading {
-                    for offsetDeg in [0.0, 8.0, -8.0] {
-                        let hd = hd0 + offsetDeg * .pi / 180.0
-                        let rx = cos(hd), ry = sin(hd)
-                        var bestDistance: Double? = nil
-                        var bestIdx: Int? = nil
-                        for k10 in 10...((options.bridgePixels + 1) * 10 - 1) {
-                            let k = Double(k10) / 10.0
-                            let fx = Int((Double(curX) + rx * k).rounded(.toNearestOrEven))
-                            let fy = Int((Double(curY) + ry * k).rounded(.toNearestOrEven))
-                            guard fx >= 0, fx < w, fy >= 0, fy < h else { continue }
-                            let idx = fy * w + fx
-                            if visited[idx] || !mask.bits[idx] { continue }
-                            let ang = abs(norm(atan2(Double(fy - curY), Double(fx - curX)) - hd0))
-                            guard ang <= 45.0 * .pi / 180.0 else { continue }
-                            let d = (Double(fx - curX) * Double(fx - curX)
-                                     + Double(fy - curY) * Double(fy - curY)).squareRoot()
-                            if bestDistance == nil || d < bestDistance! {
-                                bestDistance = d; bestIdx = idx
-                            }
-                        }
-                        if let bd = bestDistance, let bi = bestIdx,
-                           landing == nil || bd < landing!.distance {
-                            landing = (bd, bi)
-                        }
-                    }
+            // Bridging before widening, not the other way round. The two disagree
+            // at the end of a dash: there *is* an unvisited neighbour there — the
+            // dash's own thickness, at whatever angle — so a widened fan would
+            // take that and wander off instead of resuming the line beyond the
+            // gap. `DigitizerTests.testTraceBridgesDashedCurve` is what says so;
+            // it goes red when these two are swapped.
+            if chosen == nil, let hd0 = heading {
+                if let land = bridgeLanding(from: hd0) {
+                    curX = land.idx % w
+                    curY = land.idx / w
+                    visited[land.idx] = true
+                    points.append(PixelPoint(x: Double(curX), y: Double(curY)))
+                    continue
                 }
-                guard let land = landing else { break }
-                curX = land.idx % w
-                curY = land.idx / w
-                visited[land.idx] = true
-                points.append(PixelPoint(x: Double(curX), y: Double(curY)))
-                continue
+                chosen = forwardStep(within: widenedFanLimit)
             }
+
+            guard let nextIdx = chosen else { break }
 
             visited[nextIdx] = true
             curX = nextIdx % w

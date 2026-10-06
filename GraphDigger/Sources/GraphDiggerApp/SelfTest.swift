@@ -705,6 +705,8 @@ enum SelfTest {
         check("未保存标记随编辑出现、保存后消失、撤销回干净", unsavedMark.passed, unsavedMark.detail)
         let menu = theMenuBarKeepsItsPromises()
         check("菜单快捷键无冲突,⌘S/⌘O 归保存与打开", menu.passed, menu.detail)
+        let replaceGuard = openingAFileAsksBeforeDiscardingTheDocument()
+        check("打开别的文件会先问,取消后原文档逐项保留、不保存才换", replaceGuard.passed, replaceGuard.detail)
 
         // --- 点重排 -----------------------------------------------------------
         // Same ring, same conversion as the eraser; what is different is that the
@@ -2556,6 +2558,96 @@ enum SelfTest {
             ? "锚点列 \(Int(anchors.xStart.x)) → 相位 \(phase);"
                 + "\(points.count) 个点全部落在 \(phase)+\(dx)k 上"
             : "相位 \(phase)(不该为 0)· 全部落线=\(onTheLattice)")
+    }
+
+    // MARK: - 换文件前的确认 (the replace guard)
+
+    /// A chart image on disk, so the open path can be driven for real.
+    private static func writeChartImage(named name: String) -> URL? {
+        guard let cg = SampleChartWriter.makeCGImage(from: SyntheticChart.render().buffer),
+              let png = NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:])
+        else { return nil }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(name)
+        return (try? png.write(to: url)) != nil ? url : nil
+    }
+
+    /// Opening another file must not throw away an unsaved document.
+    ///
+    /// Driven through the real `openDocument(at:)` — the point that every way in
+    /// passes through (`⌘O`, a double-click in the Finder, a drop on the icon,
+    /// and the file handed over at launch) — with the alert replaced by a stub
+    /// answer. The stub is not a convenience: an `NSAlert.runModal()` cannot be
+    /// driven head-lessly at all, so the cancel branch is unreachable without it,
+    /// and a missing call site is exactly the kind of bug that leaves no trace.
+    ///
+    /// Three answers in one pass:
+    ///
+    ///   · nothing edited yet → nobody is asked, because there is nothing to lose
+    ///   · 取消               → the document survives, down to the calibration
+    ///   · 不保存             → the replacement happens
+    private static func openingAFileAsksBeforeDiscardingTheDocument() -> (passed: Bool, detail: String) {
+        guard let first = writeChartImage(named: "gd-selftest-open-a.png"),
+              let second = writeChartImage(named: "gd-selftest-open-b.png") else {
+            return (false, "写不出测试图片")
+        }
+        defer {
+            try? FileManager.default.removeItem(at: first)
+            try? FileManager.default.removeItem(at: second)
+        }
+
+        let delegate = AppDelegate()
+        // The same order  uses. It matters:
+        // `refreshUI` names the undo action in its menu items, so building the
+        // window first would announce a state change into menu items that do not
+        // exist yet.
+        delegate.buildMenu()
+        delegate.buildWindow()
+        guard let canvas = delegate.canvas else { return (false, "画布没建出来") }
+
+        var asked = 0
+        var answer = NSApplication.ModalResponse.alertThirdButtonReturn   // 取消
+        delegate.unsavedChangesPrompt = {
+            asked += 1
+            return answer
+        }
+
+        delegate.openDocument(at: first)
+        let askedWhenClean = asked
+        guard canvas.imageName == first.lastPathComponent else {
+            return (false, "第一张图没打开(画布上是 \(canvas.imageName ?? "空"))")
+        }
+
+        // An edit that exists only in memory — the thing worth protecting.
+        canvas.applyCalibration(anchors: CalibrationAnchors(
+                                    xStart: PixelPoint(x: 40, y: 300),
+                                    xEnd: PixelPoint(x: 400, y: 300),
+                                    yStart: PixelPoint(x: 40, y: 300),
+                                    yEnd: PixelPoint(x: 40, y: 40)),
+                                xStartValue: 0, xEndValue: 10,
+                                yStartValue: 0, yEndValue: 5,
+                                xIsLogarithmic: false, yIsLogarithmic: false)
+        guard canvas.hasUnsavedChanges else { return (false, "编辑没有把文档标脏") }
+        let calibration = canvas.state.calibration
+
+        delegate.openDocument(at: second)
+        let askedOnCancel = asked - askedWhenClean
+        let survived = canvas.imageName == first.lastPathComponent
+            && canvas.state.calibration == calibration
+            && canvas.hasUnsavedChanges
+
+        answer = .alertSecondButtonReturn   // 不保存
+        delegate.openDocument(at: second)
+        let askedOnDiscard = asked - askedWhenClean - askedOnCancel
+        let replaced = canvas.imageName == second.lastPathComponent
+            && canvas.state.calibration == nil
+            && !canvas.hasUnsavedChanges
+
+        let passed = askedWhenClean == 0 && askedOnCancel == 1 && askedOnDiscard == 1
+            && survived && replaced
+        return (passed, passed
+            ? "未编辑时不问 · 取消后文档与标定原样保留 · 选不保存才换成新图"
+            : "未编辑却问了 \(askedWhenClean) 次 · 取消时问了 \(askedOnCancel) 次 · 原文档保留=\(survived)"
+                + " · 不保存时问了 \(askedOnDiscard) 次 · 已替换=\(replaced)")
     }
 
     // MARK: - 项目文件 (project files)

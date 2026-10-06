@@ -21,7 +21,10 @@ extension UTType {
 final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var window: NSWindow!
-    private var canvas: CanvasView!
+    /// Not private, like `buildMenu()` above it: the selftest drives the file
+    /// commands through this canvas, because the guard that keeps one document
+    /// from silently replacing another is only reachable through a modal alert.
+    var canvas: CanvasView!
     private var toolbar: ToolbarView!
     private var bitmap: InfoBarView!
     private var sidebar: SidebarView!
@@ -91,7 +94,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// By the file, not by which command was invoked: the open panel accepts both
     /// kinds and a double-clicked file arrives with no command at all, so a
     /// decision made per call site would be wrong for one of them.
-    private func openDocument(at url: URL) {
+    /// **Every** way of replacing the document funnels through here — `⌘O`, a
+    /// double-click in the Finder, a drop on the icon, and the file handed over
+    /// at launch — and every one of them has to ask before discarding what is on
+    /// screen.
+    ///
+    /// They did not. The guard existed and was wired to `⌘Q` and to the close
+    /// button, but not to this path, so picking a second image from the open
+    /// panel threw away the calibration, the curves and every point of the first
+    /// one without a word — and then cleared the modified dot as well, so the
+    /// window looked *more* saved afterwards than before. The one moment a user
+    /// is least likely to be watching is the one where he has just asked to look
+    /// at something else.
+    /// Not private: the selftest calls this directly, which is the only way to
+    /// see that all four ways in ask the same question first.
+    func openDocument(at url: URL) {
+        guard confirmClosingTheDocument() else { return }
+        // The answer is spent here, whatever happens next. If the file turns out
+        // to be unreadable the old document is still on screen and still
+        // unsaved, so a 「不保存」 meant for this attempt must not be carried over
+        // to the next close.
+        discardConfirmed = false
         if url.pathExtension.lowercased() == ProjectFile.fileExtension {
             openProject(at: url)
         } else {
@@ -101,7 +124,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Window
 
-    private func buildWindow() {
+    /// Not private: the selftest builds a real window and then calls the real
+    /// file commands on it. See `canvas` above.
+    func buildWindow() {
         let toolbarHeight = MainLayout.toolbarHeight
 
         // Measured before the window exists so the minimum width is derived
@@ -390,7 +415,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // one, and the baseline is "nothing has been done to this picture".
         projectURL = nil
         canvas.markSaved()
-        discardConfirmed = false
         refreshUI("已载入 \(url.lastPathComponent) —— 标定坐标系后即可取点")
     }
 
@@ -424,7 +448,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         projectURL = url
         canvas.markSaved()
-        discardConfirmed = false
         canvas.zoomToFit()
         // A reopened project is not in the middle of anything: the tool goes back
         // to 浏览 so the first click pans rather than drawing.
@@ -524,14 +547,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if discardConfirmed { return true }
         guard hasUnsavedChanges else { return true }
 
-        let alert = NSAlert()
-        alert.messageText = "要保存对项目的修改吗?"
-        alert.informativeText = "项目里包含图片、标定坐标系和 \(canvas.state.totalPointCount) 个数据点,"
-            + "不保存就关掉会全部丢失。"
-        alert.addButton(withTitle: "保存")
-        alert.addButton(withTitle: "不保存")
-        alert.addButton(withTitle: "取消")
-        switch alert.runModal() {
+        switch askAboutUnsavedChanges() {
         case .alertFirstButtonReturn:
             // A cancelled save panel is not a yes: the file was never written, so
             // closing now would discard the work the user just asked to keep.
@@ -542,6 +558,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         default:
             return false
         }
+    }
+
+    /// Puts the question to the user. Substituted by the selftest.
+    ///
+    /// A seam on the instance rather than a parameter on
+    /// `confirmClosingTheDocument` because the callers that matter are all
+    /// *inside* the app — the open panel, the launch hand-off, the window
+    /// delegate — and none of them is in a position to pass one along. It is also
+    /// the only way to reach the cancel branch: an `NSAlert.runModal()` cannot be
+    /// driven head-lessly, and a guard that is never seen to refuse is a guard
+    /// nobody has actually checked.
+    var unsavedChangesPrompt: (() -> NSApplication.ModalResponse)?
+
+    private func askAboutUnsavedChanges() -> NSApplication.ModalResponse {
+        if let prompt = unsavedChangesPrompt { return prompt() }
+        let alert = NSAlert()
+        alert.messageText = "要保存对项目的修改吗?"
+        alert.informativeText = "项目里包含图片、标定坐标系和 \(canvas.state.totalPointCount) 个数据点,"
+            + "不保存就关掉会全部丢失。"
+        alert.addButton(withTitle: "保存")
+        alert.addButton(withTitle: "不保存")
+        alert.addButton(withTitle: "取消")
+        return alert.runModal()
     }
 
     /// Whether the document has edits a save would capture. The canvas owns the

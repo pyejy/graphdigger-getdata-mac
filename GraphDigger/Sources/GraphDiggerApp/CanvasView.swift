@@ -611,6 +611,20 @@ final class CanvasView: NSView {
         guard install(image: image, data: data, name: name) else { return false }
         state.lines.removeAll()
         state.activeLineID = nil
+        // And the coordinate system goes with them. The four anchors are pixel
+        // positions **in the picture that just went away**, so keeping them would
+        // leave the new chart labelled with the old one's axes: the status line
+        // would say 已标定, every point would convert to a plausible-looking
+        // number, and the markers would sit wherever those pixels happen to fall
+        // on a chart they were never measured from. Being wrong quietly is worse
+        // than having to click four points again — and the two images are not
+        // even the same size in general, which is what first gave it away (the
+        // selftest's replace-guard check noticed the stale map).
+        //
+        // A project file does not come through here: `load(project:)` installs the
+        // state whole, calibration included.
+        state.calibration = nil
+        state.calibrationAnchors = nil
         // The snapshots describe a chart that is no longer on screen. Restoring
         // one would put points back onto a different picture, at coordinates that
         // meant something in the old one.
