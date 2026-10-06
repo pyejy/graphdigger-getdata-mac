@@ -150,6 +150,12 @@ final class SidebarView: NSView {
         curveTable.backgroundColor = .textBackgroundColor
         curveTable.gridStyleMask = [.solidHorizontalGridLineMask]
         curveTable.gridColor = Self.gridColor
+        // Zero like the point table's: the default 3pt of intercell spacing is
+        // *added* to the column width when the table sizes itself, so a column
+        // set to exactly the clip width still overflowed by 6pt — the point
+        // count ended half outside the panel with a horizontal scroller to
+        // reach it.
+        curveTable.intercellSpacing = NSSize(width: 0, height: 0)
         curveTable.dataSource = self
         curveTable.delegate = self
         let curveColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("curve"))
@@ -241,6 +247,20 @@ final class SidebarView: NSView {
 
         let pointBox = card(header: pointHeading, body: [pointScroll, emptyLabel],
                             width: Self.pad * 2)
+
+        // The columns are sized from the clip view's width, and on a system
+        // with legacy ("always show") scrollers that width *shrinks when the
+        // vertical scroller appears* — e.g. the moment a fifth curve arrives.
+        // `layout()` does not run for that (nothing in the panel moved), so
+        // without this the columns stay at the wider measure and the point
+        // counts slide under the panel edge. Re-size whenever the clip
+        // changes, from whatever cause.
+        for scroll in [curveScroll, pointScroll] {
+            scroll.contentView.postsBoundsChangedNotifications = true
+            NotificationCenter.default.addObserver(
+                self, selector: #selector(clipViewBoundsChanged(_:)),
+                name: NSView.boundsDidChangeNotification, object: scroll.contentView)
+        }
 
         self.curveBox = curveBox
         self.pointBox = pointBox
@@ -397,6 +417,10 @@ final class SidebarView: NSView {
             default:      column.width = valueWidth
             }
         }
+    }
+
+    @objc private func clipViewBoundsChanged(_ note: Notification) {
+        sizeColumns()
     }
 
     // MARK: - Update

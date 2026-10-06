@@ -1121,6 +1121,10 @@ enum SelfTest {
         check("工具栏与信息条背景跟随深浅外观(不再固化在启动时的外观)",
               chrome.passed, chrome.detail)
 
+        let listFit = curveListFitsWithoutHorizontalScrolling()
+        check("曲线列表与点表不横向溢出(点数列不需要横向滚动才看得到)",
+              listFit.passed, listFit.detail)
+
         print(String(repeating: "─", count: 62))
         if failures == 0 {
             print("全部通过。")
@@ -4753,6 +4757,44 @@ enum SelfTest {
         let detail = values.map { "\($0.0) 浅 \(String(format: "%.3f", $0.1)) · 深 \(String(format: "%.3f", $0.2))" }
             .joined(separator: "; ")
         return (passed, detail)
+    }
+
+    /// The curve list must not need a horizontal scroll to show its own
+    /// contents. Regression: the table kept the default 3pt of intercell
+    /// spacing, which NSTableView *adds on top of* the column widths when it
+    /// sizes itself — so a column sized to exactly the clip view still
+    /// overflowed by 6pt, and the point count at the row's right edge ended
+    /// half outside the panel, reachable only by scrolling sideways. Asserted
+    /// arithmetically (columns + spacing ≤ clip), for both tables.
+    private static func curveListFitsWithoutHorizontalScrolling()
+        -> (passed: Bool, detail: String) {
+        var lines: [CurveLine] = []
+        for i in 1...5 {
+            var line = CurveLine(name: "曲线 \(i)", color: RGB8(r: 200, g: 40, b: 90))
+            for x in 0..<7 { line.points.append(PixelPoint(x: Double(x), y: Double(x))) }
+            lines.append(line)
+        }
+        let sidebar = SidebarView(frame: NSRect(x: 0, y: 0, width: 264, height: 700))
+        sidebar.update(lines: lines, calibration: nil, activeID: lines[3].id)
+        sidebar.layoutSubtreeIfNeeded()
+
+        let scrolls = descendants(of: sidebar).compactMap { $0 as? NSScrollView }
+        var parts: [String] = []
+        var ok = true
+        for (label, columns) in [("曲线列表", 1), ("点表", 3)] {
+            guard let table = scrolls.compactMap({ $0.documentView as? NSTableView })
+                .first(where: { $0.numberOfColumns == columns }),
+                  let scroll = table.enclosingScrollView else {
+                return (false, "找不到\(label)的滚动区")
+            }
+            let needed = table.tableColumns.reduce(0) { $0 + $1.width }
+                + CGFloat(table.numberOfColumns + 1) * table.intercellSpacing.width
+            let available = scroll.contentSize.width
+            parts.append("\(label) 需 \(String(format: "%.1f", needed))"
+                         + " / 得 \(String(format: "%.1f", available))")
+            if needed > available + 0.5 { ok = false }
+        }
+        return (ok, parts.joined(separator: "; "))
     }
 
     /// "Excel-style", as the user put it: every row separated by a rule and every
