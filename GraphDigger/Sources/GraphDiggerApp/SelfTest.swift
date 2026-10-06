@@ -722,6 +722,11 @@ enum SelfTest {
         let replaceGuard = openingAFileAsksBeforeDiscardingTheDocument()
         check("打开别的文件会先问,取消后原文档逐项保留、不保存才换", replaceGuard.passed, replaceGuard.detail)
 
+        // --- 导出格式 (FR-9 / FR-11)------------------------------------------
+        let separator = theDecimalSeparatorReachesTheExportedBytes()
+        check("导出小数分隔符真的进了文件:逗号时 1,875000 且 CSV 列改用分号,默认仍是句点",
+              separator.passed, separator.detail)
+
         // --- 两个「用来看」的视图(FR-1.3 / FR-7.1)-----------------------------
         let hideImage = hidingTheImageTakesNothingAway()
         check("隐藏原图只是不画它:文档不变、位图与掩膜都在,且仍能取点", hideImage.passed, hideImage.detail)
@@ -2796,6 +2801,123 @@ enum SelfTest {
             ? "未编辑时不问 · 取消后文档与标定原样保留 · 选不保存才换成新图"
             : "未编辑却问了 \(askedWhenClean) 次 · 取消时问了 \(askedOnCancel) 次 · 原文档保留=\(survived)"
                 + " · 不保存时问了 \(askedOnDiscard) 次 · 已替换=\(replaced)")
+    }
+
+    // MARK: - 导出小数分隔符 (FR-11)
+
+    /// The decimal separator, checked through the bytes an export actually
+    /// produces rather than through the setting.
+    ///
+    /// The preference has no other observable effect: nothing on screen moves
+    /// when it changes, and the save panel that would show the file needs a
+    /// person to answer it. So the check drives the real menu path — the real
+    /// `setDecimalSeparator`, which is what the menu item calls — and then reads
+    /// `exportPayload` / `clipboardText`, which are the calls the save panel and
+    /// the pasteboard make. What is being verified is the *wiring*: a setting
+    /// that reaches the menu and not the exporter looks exactly like this one
+    /// working, right up to the moment a colleague opens the file.
+    ///
+    /// Run against a throwaway defaults suite. The selftest is a real run of the
+    /// real binary, so writing through `.standard` here would leave the setting
+    /// changed for whoever ran it — a test that quietly rewrites the user's
+    /// preferences is worse than no test.
+    private static func theDecimalSeparatorReachesTheExportedBytes() -> (passed: Bool, detail: String) {
+        let suiteName = "GraphDiggerSelftest"
+        guard let suite = UserDefaults(suiteName: suiteName) else {
+            return (false, "建不出测试用的偏好域")
+        }
+        suite.removePersistentDomain(forName: suiteName)
+        defer { suite.removePersistentDomain(forName: suiteName) }
+
+        let delegate = AppDelegate()
+        delegate.exportPreferences = suite
+        delegate.buildMenu()
+        delegate.buildWindow()
+        guard let canvas = delegate.canvas else { return (false, "画布没建出来") }
+
+        // A curve whose values really do have fractions in them, loaded as a
+        // project so the canvas carries both a calibration and points. Built
+        // rather than scanned: what is under test is the spelling of the numbers,
+        // so the numbers want to be known exactly.
+        let chart = SyntheticChart.render()
+        guard let cg = SampleChartWriter.makeCGImage(from: chart.buffer),
+              let png = NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:])
+        else { return (false, "造不出测试图") }
+        var state = ProjectState(calibration: CalibrationMap(
+            x: AxisCalibration(pixelMin: 100, valueMin: 0, pixelMax: 900, valueMax: 10),
+            y: AxisCalibration(pixelMin: 600, valueMin: 0, pixelMax: 100, valueMax: 5)))
+        // (250,480) -> (1.875, 1.2); (500,350) -> (5, 2.5).
+        state.append(points: [PixelPoint(x: 250, y: 480), PixelPoint(x: 500, y: 350)],
+                     usingDefaultColor: RGB8(r: 200, g: 40, b: 40))
+        let document = ProjectDocument(
+            header: ProjectHeader(image: ProjectImageInfo(fileName: "separator.png",
+                                                          pixelWidth: chart.buffer.width,
+                                                          pixelHeight: chart.buffer.height),
+                                  state: state),
+            imageData: png)
+        guard canvas.load(project: document) else { return (false, "项目载不进画布") }
+
+        // The menu itself. Two entries, each carrying the setting it stands for:
+        // a pair wired to the same one would look right and never change a byte.
+        var separatorItems: [NSMenuItem] = []
+        func find(_ menu: NSMenu) {
+            for item in menu.items {
+                if item.submenu?.title == "Decimal Separator" {
+                    separatorItems = item.submenu?.items ?? []
+                    return
+                }
+                if let sub = item.submenu { find(sub) }
+            }
+        }
+        if let main = NSApp.mainMenu { find(main) }
+        let offered = Set(separatorItems.compactMap { $0.representedObject as? String })
+        let menuOK = separatorItems.count == DecimalSeparator.allCases.count
+            && offered == Set(DecimalSeparator.allCases.map(\.rawValue))
+
+        func tick(of separator: DecimalSeparator) -> NSControl.StateValue? {
+            separatorItems.first { $0.representedObject as? String == separator.rawValue }?.state
+        }
+
+        // 逗号 —— 数值写成 1,5,CSV 的列必须改用分号。
+        delegate.setDecimalSeparator(.comma)
+        // A second delegate on the same suite: the setting has to survive the
+        // launch, which is the whole reason it lives in defaults rather than in
+        // the view.
+        let remembered = AppDelegate()
+        remembered.exportPreferences = suite
+        let survives = remembered.exportDecimalSeparator == .comma
+
+        let commaCSV = (try? delegate.exportPayload(format: .csv))
+            .flatMap { String(data: $0, encoding: .utf8) }
+        let commaTSV = try? delegate.clipboardText()
+        let expectedCommaCSV = "x;y\n1,875000;1,200000\n5,000000;2,500000\n"
+        let commaOK = commaCSV == expectedCommaCSV && commaTSV == "x\ty\n1,875000\t1,200000\n5,000000\t2,500000\n"
+        let commaTick = tick(of: .comma) == .on && tick(of: .dot) == .off
+
+        // …and the default, which is the backward-compatibility promise: every
+        // caller that existed before this feature passed no separator at all.
+        delegate.setDecimalSeparator(.dot)
+        let dotCSV = (try? delegate.exportPayload(format: .csv))
+            .flatMap { String(data: $0, encoding: .utf8) }
+        let dotOK = dotCSV == "x,y\n1.875000,1.200000\n5.000000,2.500000\n"
+            && (try? delegate.clipboardText()) == "x\ty\n1.875000\t1.200000\n5.000000\t2.500000\n"
+            && tick(of: .dot) == .on && tick(of: .comma) == .off
+
+        // The machine formats ignore it entirely — their grammars are fixed, and
+        // `x="1,5"` is not a number to an XML parser. Byte-for-byte, because
+        // "nearly the same file" is the failure mode that would matter.
+        let dotXML = try? delegate.exportPayload(format: .xml)
+        delegate.setDecimalSeparator(.comma)
+        let commaXML = try? delegate.exportPayload(format: .xml)
+        delegate.setDecimalSeparator(.dot)
+        let xmlSame = dotXML != nil && dotXML == commaXML
+
+        let passed = menuOK && survives && commaOK && commaTick && dotOK && xmlSame
+        return (passed, passed
+            ? "逗号:1,875000 · CSV 用分号 · 剪贴板同步 · 换次启动仍记得 · 句点下与旧文件逐字节相同 · XML 不受影响"
+            : "菜单=\(menuOK)(\(separatorItems.count) 项) 记住=\(survives)"
+                + " 逗号输出=\(commaOK)[\(commaCSV ?? "nil")] 勾=\(commaTick)"
+                + " 句点输出=\(dotOK)[\(dotCSV ?? "nil")] XML不变=\(xmlSame)")
     }
 
     // MARK: - 符号匹配 (scatter symbols)

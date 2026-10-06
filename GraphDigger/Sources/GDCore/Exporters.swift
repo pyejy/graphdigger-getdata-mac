@@ -40,6 +40,59 @@ public enum ExportFormat: String, CaseIterable, Sendable {
     }
 }
 
+/// Which character separates a number's whole part from its fraction.
+///
+/// A *preference*, not a document property: whether `1.5` or `1,5` is the right
+/// spelling depends on the spreadsheet at the receiving end and on nothing about
+/// the chart, so one project can legitimately go out both ways. A European or
+/// partially localised Chinese Excel reads the comma, and a `1.5` handed to one
+/// of those arrives as text sitting in a column of its own — which is why the
+/// two most-used digitizers both expose this switch.
+public enum DecimalSeparator: String, CaseIterable, Sendable {
+    /// `1.5` with `,` between columns — the Anglo-American convention, default.
+    case dot
+    /// `1,5` with `;` between columns — the European convention.
+    case comma
+
+    public var character: String {
+        switch self {
+        case .dot: return "."
+        case .comma: return ","
+        }
+    }
+
+    /// What goes *between* CSV columns.
+    ///
+    /// It has to move with the decimal separator rather than sit beside it. A
+    /// file whose columns are commas and whose decimals are commas cannot be
+    /// read back at all: `1,5,2,5` splits two ways and nothing in the text says
+    /// which is meant. The semicolon is what a European Excel writes and expects
+    /// for exactly this reason, so picking the comma here makes the file *more*
+    /// portable, not less.
+    ///
+    /// TSV and TXT are unaffected — a tab or a space is not a decimal point.
+    public var csvSeparator: String {
+        switch self {
+        case .dot: return ","
+        case .comma: return ";"
+        }
+    }
+
+    public var displayName: String {
+        switch self {
+        case .dot: return "句点 . —— 1.5"
+        case .comma: return "逗号 , —— 1,5"
+        }
+    }
+
+    public var hint: String {
+        switch self {
+        case .dot: return "导出 1.5;CSV 的列用逗号分隔。"
+        case .comma: return "导出 1,5;CSV 的列改用分号分隔 —— 否则逗号既当小数点又当列边界,文件读不回来。"
+        }
+    }
+}
+
 public enum ExportError: Error, Equatable {
     case calibrationMissing
     case noPoints
@@ -60,17 +113,24 @@ public enum Exporter {
     ///   - calibration: mapping from stored pixel points to chart values.
     ///   - format: target format.
     ///   - includeHeader: emit a column-name row where the format supports it.
+    ///   - decimalSeparator: how numbers are spelt in the delimited formats.
+    ///     XML, DXF and EPS ignore it — their grammars are fixed, and a CAD
+    ///     package or a PostScript interpreter reading `1,5` is reading a
+    ///     two-element list. XLSX ignores it too, because its numbers are stored
+    ///     as numbers rather than as text.
     public static func text(for lines: [CurveLine],
                             calibration: CalibrationMap?,
                             format: ExportFormat,
-                            includeHeader: Bool = true) throws -> String {
+                            includeHeader: Bool = true,
+                            decimalSeparator: DecimalSeparator = .dot) throws -> String {
         let populated = lines.filter { !$0.points.isEmpty }
         guard !populated.isEmpty else { throw ExportError.noPoints }
 
         switch format {
         case .csv, .tsv, .txt:
             return try delimited(populated, calibration: calibration,
-                                 format: format, includeHeader: includeHeader)
+                                 format: format, includeHeader: includeHeader,
+                                 decimalSeparator: decimalSeparator)
         case .xml:
             return try xml(populated, calibration: calibration)
         case .dxf:
@@ -92,12 +152,18 @@ public enum Exporter {
     public static func data(for lines: [CurveLine],
                             calibration: CalibrationMap?,
                             format: ExportFormat,
-                            includeHeader: Bool = true) throws -> Data {
+                            includeHeader: Bool = true,
+                            decimalSeparator: DecimalSeparator = .dot) throws -> Data {
         if format == .xlsx {
+            // The separator is accepted and dropped on purpose: a workbook holds
+            // real numbers, and how the reader's Excel *displays* them is the
+            // reader's own locale. Refusing here would make the caller special-case
+            // the format, which is the thing this entry point exists to prevent.
             return try XLSXWriter.data(for: lines, calibration: calibration)
         }
         return Data(try text(for: lines, calibration: calibration,
-                             format: format, includeHeader: includeHeader).utf8)
+                             format: format, includeHeader: includeHeader,
+                             decimalSeparator: decimalSeparator).utf8)
     }
 
     /// Value for a point, used by the numeric formats.
@@ -129,25 +195,45 @@ public enum Exporter {
     /// Shared with `XLSXWriter` on purpose: the number in the workbook is the
     /// number in the CSV, so a user comparing the two does not have to wonder
     /// which export is the accurate one.
-    static func decimal(_ v: Double) -> String {
-        if v == 0 { return "0" }
-        let magnitude = abs(v)
-        if magnitude >= 1e6 || magnitude < 1e-4 {
-            return String(format: "%.6e", v)
+    ///
+    /// `separator` reaches the number itself, not the layout — the delimited
+    /// formats pass theirs, everything else takes the default.
+    static func decimal(_ v: Double, separator: DecimalSeparator = .dot) -> String {
+        let text: String
+        if v == 0 {
+            text = "0"
+        } else {
+            let magnitude = abs(v)
+            text = magnitude >= 1e6 || magnitude < 1e-4
+                ? String(format: "%.6e", v)
+                : String(format: "%.6f", v)
         }
-        return String(format: "%.6f", v)
+        guard separator == .comma else { return text }
+        // A replacement rather than a `%f` with a locale, and deliberately: a
+        // locale-formatted number would make the exported bytes depend on the
+        // machine that produced them, so the same project would leave two
+        // different files from two colleagues' Macs and neither could be
+        // compared with the other. `String(format:)` is documented as
+        // unlocalised, so the dot is known to be there and to be the only one —
+        // nothing else a number can contain (digits, `e`, `+`, `-`) is a dot.
+        return text.replacingOccurrences(of: ".", with: separator.character)
     }
 
     private static func delimited(_ lines: [CurveLine],
                                   calibration: CalibrationMap?,
                                   format: ExportFormat,
-                                  includeHeader: Bool) throws -> String {
+                                  includeHeader: Bool,
+                                  decimalSeparator: DecimalSeparator) throws -> String {
         let separator: String
         switch format {
-        case .csv: separator = ","
+        case .csv: separator = decimalSeparator.csvSeparator
         case .tsv: separator = "\t"
         default:   separator = " "
         }
+
+        /// A number as this export wants it spelt. Local so the three layouts
+        /// below cannot each pick their own answer.
+        func number(_ v: Double) -> String { decimal(v, separator: decimalSeparator) }
 
         /// One curve's points as chart values, in display order.
         func rows(_ line: CurveLine) throws -> [DataPoint] {
@@ -160,7 +246,7 @@ public enum Exporter {
             if includeHeader { out += "x\(separator)y\n" }
             for line in lines {
                 for data in try rows(line) {
-                    out += decimal(data.x) + separator + decimal(data.y) + "\n"
+                    out += number(data.x) + separator + number(data.y) + "\n"
                 }
             }
             return out
@@ -186,7 +272,7 @@ public enum Exporter {
             for (index, line) in lines.enumerated() {
                 if includeHeader { out += "# \(line.name)\n" }
                 for data in try rows(line) {
-                    out += decimal(data.x) + separator + decimal(data.y) + "\n"
+                    out += number(data.x) + separator + number(data.y) + "\n"
                 }
                 if index < lines.count - 1 { out += "\n" }
             }
@@ -203,8 +289,8 @@ public enum Exporter {
             var cells: [String] = []
             for column in columns {
                 if row < column.count {
-                    cells.append(decimal(column[row].x))
-                    cells.append(decimal(column[row].y))
+                    cells.append(number(column[row].x))
+                    cells.append(number(column[row].y))
                 } else {
                     // Stayed empty on purpose: a hole in the middle of a row would
                     // shift every later column left and pair the wrong values.

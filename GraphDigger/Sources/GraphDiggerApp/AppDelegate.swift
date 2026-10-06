@@ -44,6 +44,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The tick beside 「显示原图」, kept so `refreshUI` can move it.
     private var showsImageMenuItem: NSMenuItem!
 
+    /// The two decimal-separator entries, for the same reason as the grid ones:
+    /// a submenu is the only place that says which way exports are currently
+    /// written, and the answer is needed *before* a file is produced — the status
+    /// line would say it only after.
+    private var decimalSeparatorItems: [DecimalSeparator: NSMenuItem] = [:]
+
     /// The data-space plot (FR-7.1), built the first time it is asked for.
     ///
     /// Held rather than rebuilt so the window keeps its position and size, and
@@ -69,6 +75,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// An open-document event can arrive before `applicationDidFinishLaunching`
     /// has built the window, so the URL is parked here and applied afterwards.
     private var pendingDocumentURL: URL?
+
+    // MARK: - Export preferences
+
+    /// Where the export preference is remembered between launches.
+    ///
+    /// `UserDefaults` and not the project file, because it is not a property of
+    /// the chart: which spelling of `1.5` the file needs depends on the
+    /// spreadsheet at the far end, so the same project may have to go out both
+    /// ways in one afternoon. Which also means it must survive a launch — a
+    /// European user who has to re-pick it every morning will simply forget, and
+    /// then wonder why a colleague's Excel shows one column of text.
+    ///
+    /// **A seam, not a convenience.** The selftest is a real run of the real
+    /// binary, so writing through `.standard` there would quietly change the
+    /// setting of whoever ran it. The selftest points this at a throwaway suite.
+    var exportPreferences: UserDefaults = .standard
+
+    private static let decimalSeparatorKey = "decimalSeparator"
+
+    /// The separator exports are currently written with. Read on every export
+    /// rather than cached, so the menu, the save panel and the clipboard can
+    /// never disagree about it.
+    var exportDecimalSeparator: DecimalSeparator {
+        get {
+            exportPreferences.string(forKey: Self.decimalSeparatorKey)
+                .flatMap(DecimalSeparator.init(rawValue:)) ?? .dot
+        }
+        set { exportPreferences.set(newValue.rawValue, forKey: Self.decimalSeparatorKey) }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
@@ -280,6 +315,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         exportActiveItem.submenu = exportActiveMenu
         fileMenu.addItem(exportActiveItem)
+
+        // How those two write their numbers — placed against them because that is
+        // what it changes, and a submenu with a tick rather than a pair of
+        // commands because it is a setting the user has to be able to *read back*
+        // before choosing a format, not after.
+        let decimalItem = NSMenuItem(title: "导出小数分隔符 (Decimal Separator)",
+                                     action: nil, keyEquivalent: "")
+        let decimalMenu = NSMenu(title: "Decimal Separator")
+        for separator in DecimalSeparator.allCases {
+            let item = NSMenuItem(title: separator.displayName,
+                                  action: #selector(chooseDecimalSeparator(_:)),
+                                  keyEquivalent: "")
+            item.representedObject = separator.rawValue
+            item.toolTip = separator.hint
+            decimalMenu.addItem(item)
+            decimalSeparatorItems[separator] = item
+        }
+        decimalItem.submenu = decimalMenu
+        fileMenu.addItem(decimalItem)
 
         fileMenu.addItem(withTitle: "Copy Data to Clipboard (复制全部曲线)",
                          action: #selector(copyData(_:)), keyEquivalent: "c")
@@ -753,6 +807,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         performExport(format: format, relativeTo: nil, onlyActive: onlyActive)
     }
 
+    /// The bytes an export would write, preferences and all.
+    ///
+    /// Split out of `performExport` because the save panel that follows cannot be
+    /// answered without a person, and the only way to see what the decimal
+    /// separator *does* is to look at the bytes it produced. Not private, so the
+    /// selftest can look.
+    func exportPayload(format: ExportFormat, onlyActive: Bool = false) throws -> Data {
+        try Exporter.data(for: curvesForExport(onlyActive: onlyActive),
+                          calibration: canvas.state.calibration,
+                          format: format,
+                          decimalSeparator: exportDecimalSeparator)
+    }
+
+    /// The same, for the clipboard — split out for the same reason, and so the
+    /// "which curves, which separator" decision has one home rather than two.
+    /// The checks read it instead of driving the real pasteboard, which is global
+    /// state a head-less run has no business overwriting.
+    func clipboardText(onlyActive: Bool = false) throws -> String {
+        try Exporter.text(for: curvesForExport(onlyActive: onlyActive),
+                          calibration: canvas.state.calibration,
+                          format: .tsv,
+                          decimalSeparator: exportDecimalSeparator)
+    }
+
     private func performExport(format: ExportFormat, relativeTo sender: NSView?,
                                onlyActive: Bool = false) {
         // Bytes rather than text: the workbook is a ZIP, and routing every format
@@ -761,9 +839,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let lines = curvesForExport(onlyActive: onlyActive)
         let payload: Data
         do {
-            payload = try Exporter.data(for: lines,
-                                        calibration: canvas.state.calibration,
-                                        format: format)
+            payload = try exportPayload(format: format, onlyActive: onlyActive)
         } catch {
             presentExportError(error)
             return
@@ -796,13 +872,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// wide table — one x/y pair per curve — since that is what lines up with
     /// columns; the labelled-block layout would paste each name into a cell of
     /// its own and shift everything below it.
+    ///
+    /// The decimal separator matters here as much as in a saved file: the paste
+    /// lands in the same Excel the file would have been read by. A tab is not a
+    /// decimal point, so TSV needs no separator swap — only the numbers' spelling.
     private func copyToClipboard(onlyActive: Bool) {
         let lines = curvesForExport(onlyActive: onlyActive)
         let text: String
         do {
-            text = try Exporter.text(for: lines,
-                                     calibration: canvas.state.calibration,
-                                     format: .tsv)
+            text = try clipboardText(onlyActive: onlyActive)
         } catch {
             presentExportError(error)
             return
@@ -832,6 +910,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         default:
             presentError("导出失败:\(error.localizedDescription)")
         }
+    }
+
+    // MARK: - 导出小数分隔符
+
+    /// Sets how exports spell their numbers — FR-11.
+    ///
+    /// Not private: the selftest drives this rather than poking the preference,
+    /// because the setting's only observable effect is on the bytes an export
+    /// produces and the panel that would show them needs a person to answer it.
+    ///
+    /// It is worth saying out loud in the status line even though nothing on
+    /// screen changes, because it changes the *next file* — and the semicolon in
+    /// the CSV is the part that surprises: a user who picks the comma and then
+    /// opens the file in a US-locale tool sees one column, not two, and would
+    /// otherwise have no way to tell that was the setting working as intended.
+    func setDecimalSeparator(_ separator: DecimalSeparator) {
+        exportDecimalSeparator = separator
+        refreshUI(separator == .comma
+                  ? "导出小数分隔符 = 逗号 —— 数值写成 1,5,CSV 的列改用分号分隔"
+                  : "导出小数分隔符 = 句点 —— 数值写成 1.5,CSV 的列用逗号分隔")
+    }
+
+    @objc private func chooseDecimalSeparator(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let separator = DecimalSeparator(rawValue: raw) else { return }
+        setDecimalSeparator(separator)
     }
 
     // MARK: - Undo
@@ -1235,6 +1339,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // two readers of the same setting is how they end up disagreeing.
         for (axis, item) in gridAxisItems {
             item.state = canvas.state.areaDigitizingGrid.axis == axis ? .on : .off
+        }
+
+        // The tick on the decimal separator, for the same reason — and read from
+        // the same place the export path reads, so the tick cannot claim one
+        // setting while the next file is written with the other.
+        for (separator, item) in decimalSeparatorItems {
+            item.state = exportDecimalSeparator == separator ? .on : .off
         }
 
         // Last, and deliberately: the title and the edited dot are read off the
