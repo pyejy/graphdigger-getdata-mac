@@ -49,7 +49,7 @@ ARCHS=(arm64 x86_64)
 # a bundle that keeps claiming an old number makes the one record that is
 # supposed to identify the build useless. It sat at 0.1.0 across two releases
 # before this line existed, which is how the problem went unnoticed.
-VERSION="0.3.1"
+VERSION="0.4.0"
 
 # The project file type, read out of the source rather than typed again here.
 #
