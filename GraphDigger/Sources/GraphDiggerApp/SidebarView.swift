@@ -230,11 +230,26 @@ final class SidebarView: NSView {
             self.delegate?.sidebar(self, didRequestRemovePointAt: row)
         }
         let titles = ["#", "X", "Y"]
-        let widths: [CGFloat] = [36, 0, 0]
+        // Column widths are the table's own job: every column that may grow
+        // carries `.autoresizingMask`, and the table sizes its frame to the
+        // clip minus whatever it reserves for the scrollers (measured: 32pt
+        // on this system — it is not a number we get to know in advance, which
+        // is exactly why setting column widths from `contentSize` by hand
+        // overflowed: the table added its reservation on top, and the point
+        // counts ended half outside the panel).
+        pointTable.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
+        // Initial widths must *fit under* the clip (minus the table's scroller
+        // reservation): a table whose content is too wide is left overflowing
+        // by the scroll view and its columns are never redistributed; one that
+        // fits is clamped to the clip and the autoresizing columns stretch to
+        // fill it. 40+80+80 leaves room for any reservation the system takes.
+        let initialWidths: [CGFloat] = [40, 80, 80]
         for (index, identifier) in Self.pointColumns.enumerated() {
             let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(identifier))
             column.title = titles[index]
-            if widths[index] > 0 { column.width = widths[index] }
+            column.width = initialWidths[index]
+            // 「#」 stays at 40; X and Y split what is left, evenly.
+            column.resizingMask = index == 0 ? [] : .autoresizingMask
             pointTable.addTableColumn(column)
         }
         let pointScroll = scroll(around: pointTable)
@@ -247,20 +262,6 @@ final class SidebarView: NSView {
 
         let pointBox = card(header: pointHeading, body: [pointScroll, emptyLabel],
                             width: Self.pad * 2)
-
-        // The columns are sized from the clip view's width, and on a system
-        // with legacy ("always show") scrollers that width *shrinks when the
-        // vertical scroller appears* — e.g. the moment a fifth curve arrives.
-        // `layout()` does not run for that (nothing in the panel moved), so
-        // without this the columns stay at the wider measure and the point
-        // counts slide under the panel edge. Re-size whenever the clip
-        // changes, from whatever cause.
-        for scroll in [curveScroll, pointScroll] {
-            scroll.contentView.postsBoundsChangedNotifications = true
-            NotificationCenter.default.addObserver(
-                self, selector: #selector(clipViewBoundsChanged(_:)),
-                name: NSView.boundsDidChangeNotification, object: scroll.contentView)
-        }
 
         self.curveBox = curveBox
         self.pointBox = pointBox
@@ -394,34 +395,10 @@ final class SidebarView: NSView {
                                    width: pointInner.width, height: pointInner.height)
         emptyLabel.frame = NSRect(x: pointInner.minX + 4, y: pointInner.minY + 8,
                                   width: pointInner.width - 8, height: 100)
-
-        sizeColumns()
     }
 
     /// Gap between one card and the next.
     private static let gap: CGFloat = 10
-
-    /// Hands each table's columns the width actually available inside its scroll
-    /// view. NSTableView does not derive column widths from its own bounds.
-    private func sizeColumns() {
-        let curveWidth = max(120, curveScroll.contentSize.width)
-        curveTable.tableColumns.first?.width = curveWidth
-
-        let pointWidth = max(120, pointScroll.contentSize.width)
-        // Fixed # column, the rest split evenly between X and Y.
-        let indexWidth: CGFloat = 40
-        let valueWidth = max(50, floor((pointWidth - indexWidth - 4) / 2))
-        for column in pointTable.tableColumns {
-            switch column.identifier.rawValue {
-            case "index": column.width = indexWidth
-            default:      column.width = valueWidth
-            }
-        }
-    }
-
-    @objc private func clipViewBoundsChanged(_ note: Notification) {
-        sizeColumns()
-    }
 
     // MARK: - Update
 
@@ -578,6 +555,10 @@ extension SidebarView: NSTableViewDelegate {
     private func curveCell(row: Int) -> NSView? {
         let line = lines[row]
         let cell = NSView(frame: NSRect(x: 0, y: 0, width: curveTable.bounds.width, height: 24))
+        // Follow the row view's width: the count is pinned to the cell's right
+        // edge, and a cell that stays at its birth width strands it wherever
+        // the table happened to be then.
+        cell.autoresizingMask = [.width]
 
         let toggle = NSButton(checkboxWithTitle: "", target: self,
                               action: #selector(visibilityChanged(_:)))

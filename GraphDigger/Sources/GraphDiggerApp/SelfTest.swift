@@ -4785,13 +4785,12 @@ enum SelfTest {
         return (passed, detail)
     }
 
-    /// The curve list must not need a horizontal scroll to show its own
-    /// contents. Regression: the table kept the default 3pt of intercell
-    /// spacing, which NSTableView *adds on top of* the column widths when it
-    /// sizes itself — so a column sized to exactly the clip view still
-    /// overflowed by 6pt, and the point count at the row's right edge ended
-    /// half outside the panel, reachable only by scrolling sideways. Asserted
-    /// arithmetically (columns + spacing ≤ clip), for both tables.
+    /// The tables must not be wider than their scroll views' clip — the real
+    /// overflow condition, learned the hard way: an earlier check summed
+    /// *column widths* against the clip and passed while the table's actual
+    /// frame stuck out by 32pt (the scroller reservation NSTableView adds on
+    /// top of the columns), which is why the point counts stayed half outside
+    /// the panel even after the "fix". Assert the frame, not the arithmetic.
     private static func curveListFitsWithoutHorizontalScrolling()
         -> (passed: Bool, detail: String) {
         var lines: [CurveLine] = []
@@ -4813,12 +4812,11 @@ enum SelfTest {
                   let scroll = table.enclosingScrollView else {
                 return (false, "找不到\(label)的滚动区")
             }
-            let needed = table.tableColumns.reduce(0) { $0 + $1.width }
-                + CGFloat(table.numberOfColumns + 1) * table.intercellSpacing.width
-            let available = scroll.contentSize.width
-            parts.append("\(label) 需 \(String(format: "%.1f", needed))"
-                         + " / 得 \(String(format: "%.1f", available))")
-            if needed > available + 0.5 { ok = false }
+            let clip = scroll.contentSize.width
+            let frame = table.frame.width
+            parts.append("\(label) 表 \(String(format: "%.1f", frame))"
+                         + " / 可见区 \(String(format: "%.1f", clip))")
+            if frame > clip + 0.5 { ok = false }
         }
         return (ok, parts.joined(separator: "; "))
     }
@@ -4854,7 +4852,11 @@ enum SelfTest {
         let top = scrollFrame.minY + 1 + headerHeight
         let bottom = scrollFrame.maxY - 1
         let left = scrollFrame.minX + 1
-        let right = scrollFrame.maxX - 1
+        // Ink ends where the *columns* end, not where the scroll view does:
+        // under legacy scrollers the table reserves room for the vertical
+        // scroller between the last column and the clip's edge, and the grid
+        // honestly does not cover it.
+        let right = scrollFrame.minX + table.rect(ofColumn: table.numberOfColumns - 1).maxX
         let interiorHeight = bottom - top
         guard interiorHeight > 0, right > left else { return false }
 
