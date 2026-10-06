@@ -125,6 +125,34 @@ public struct ProjectState: Equatable, Codable, Sendable {
     public var defaultColorTolerance: Double
     /// Grid spacing for area digitising, in pixels.
     public var gridSpacing: Int
+
+    /// Which way the area digitizer's scan lines run — FR-5.4.
+    ///
+    /// **Optional on purpose.** `ProjectFile`'s compatibility rule is that a
+    /// field added to this type has to be one the synthesised decoder can fill
+    /// from a missing key — true of `Optional` and of nothing else. A project
+    /// saved before this option existed still has to open. Read it through
+    /// `areaDigitizingGrid`, which supplies the default.
+    public var gridAxis: GridAxis?
+
+    /// Where the grid's scan lines fall, as an **absolute** pixel phase — FR-5.5.
+    ///
+    /// Optional for the same reason as `gridAxis`. The lines are the lattice
+    /// `gridOffset + k·gridSpacing`; a shift of one whole spacing draws the same
+    /// grid, so the digitizer folds it rather than storing it in whatever form it
+    /// was handed.
+    public var gridOffset: Int?
+
+    /// Both grid options as the digitizer wants them, defaulted for project files
+    /// written before either existed.
+    ///
+    /// One accessor rather than two resolved properties because a scan needs both
+    /// a direction and a phase, and reading one without the other would be a
+    /// half-applied setting.
+    public var areaDigitizingGrid: (axis: GridAxis, phase: Int) {
+        (gridAxis ?? .x, gridOffset ?? 0)
+    }
+
     /// How far apart auto trace keeps its points, in pixels of travel along the
     /// path. 1 keeps every pixel the walk visited.
     ///
@@ -145,6 +173,8 @@ public struct ProjectState: Equatable, Codable, Sendable {
                 defaultBackgroundColor: RGB8? = nil,
                 defaultColorTolerance: Double = 60,
                 gridSpacing: Int = 8,
+                gridAxis: GridAxis? = nil,
+                gridOffset: Int? = nil,
                 traceSpacing: Int = 1,
                 calibrationAnchors: CalibrationAnchors? = nil) {
         self.calibration = calibration
@@ -153,6 +183,8 @@ public struct ProjectState: Equatable, Codable, Sendable {
         self.defaultBackgroundColor = defaultBackgroundColor
         self.defaultColorTolerance = defaultColorTolerance
         self.gridSpacing = gridSpacing
+        self.gridAxis = gridAxis
+        self.gridOffset = gridOffset
         self.traceSpacing = traceSpacing
         self.calibrationAnchors = calibrationAnchors
     }

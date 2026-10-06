@@ -931,6 +931,33 @@ final class CanvasView: NSView {
         delegate?.canvas(self, didChangeParameter: .gridSpacing, to: Double(clamped))
     }
 
+    /// Turns the area digitizer's grid a quarter turn — FR-5.4.
+    ///
+    /// Exposed for the same reason the spacings are: it is how the next 框选
+    /// samples, not something done to the data, so it stays out of the undo
+    /// history. But unlike the spacings it is not a density — it decides *which
+    /// points exist at all* on a curve that doubles back, so the difference is
+    /// visible in the result rather than only in how fine it is.
+    func setGridAxis(_ axis: GridAxis) {
+        guard axis != state.areaDigitizingGrid.axis else { return }
+        state.gridAxis = axis
+        delegate?.canvasDidChangeState(self)
+    }
+
+    /// Slides the grid so its lines fall on the given absolute pixel — FR-5.5.
+    ///
+    /// Takes a pixel rather than an offset because that is what the caller knows:
+    /// 「让网格穿过坐标原点」 is a pixel the calibration already has, and asking
+    /// the caller to work out the phase modulo the spacing would be handing it an
+    /// arithmetic step that can silently be wrong by a whole spacing.
+    func alignGrid(toPixel pixel: Double, spacing: Int) {
+        let dx = max(1, spacing)
+        let folded = AreaDigitizer.foldedPhase(Int(pixel.rounded()), dx: dx)
+        guard folded != state.areaDigitizingGrid.phase else { return }
+        state.gridOffset = folded
+        delegate?.canvasDidChangeState(self)
+    }
+
     /// How far apart auto trace keeps the points it walks through, in pixels of
     /// travel along the path.
     ///
@@ -1904,8 +1931,10 @@ final class CanvasView: NSView {
                                   y0: Int(rect.minY.rounded()),
                                   x1: Int(rect.maxX.rounded()),
                                   y1: Int(rect.maxY.rounded()))
+        let grid = state.areaDigitizingGrid
         let points = AreaDigitizer.digitize(mask: mask, rect: pixelRect,
-                                            dx: max(1, state.gridSpacing))
+                                            dx: max(1, state.gridSpacing),
+                                            axis: grid.axis, phase: grid.phase)
         guard !points.isEmpty else {
             delegate?.canvas(self, didFailWith: "该区域内没有找到曲线像素。请检查取色是否准确,或调大颜色容差。")
             return
@@ -1991,8 +2020,10 @@ final class CanvasView: NSView {
                                   y0: Int(rect.minY.rounded()),
                                   x1: Int(rect.maxX.rounded()),
                                   y1: Int(rect.maxY.rounded()))
+        let grid = state.areaDigitizingGrid
         let fresh = AreaDigitizer.digitize(mask: mask, rect: pixelRect,
-                                           dx: max(1, state.gridSpacing))
+                                           dx: max(1, state.gridSpacing),
+                                           axis: grid.axis, phase: grid.phase)
         // Written back through `replacePoints` so the sweep is invalidated even in
         // the case the removal above did not touch anything but the refill adds to
         // the curve.

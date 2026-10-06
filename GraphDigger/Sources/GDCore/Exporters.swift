@@ -14,8 +14,18 @@ public enum ExportFormat: String, CaseIterable, Sendable {
     case dxf
     /// PostScript, one polyline per curve.
     case eps
+    /// SpreadsheetML — a real workbook, one sheet per curve. Binary, so it goes
+    /// out through `Exporter.data(for:calibration:format:)` rather than `text`.
+    case xlsx
 
     public var fileExtension: String { rawValue }
+
+    /// Whether the format is text that `Exporter.text` can produce.
+    ///
+    /// A workbook is a ZIP of XML parts, so "the export as a string" has no
+    /// answer for it — and the callers that need to know are exactly the ones
+    /// choosing between writing a string and writing bytes.
+    public var isText: Bool { self != .xlsx }
 
     public var displayName: String {
         switch self {
@@ -25,6 +35,7 @@ public enum ExportFormat: String, CaseIterable, Sendable {
         case .xml: return "XML"
         case .dxf: return "DXF (AutoCAD)"
         case .eps: return "EPS (PostScript)"
+        case .xlsx: return "XLSX (Excel 工作簿,每线一个表)"
         }
     }
 }
@@ -32,6 +43,11 @@ public enum ExportFormat: String, CaseIterable, Sendable {
 public enum ExportError: Error, Equatable {
     case calibrationMissing
     case noPoints
+    /// Asked for a text rendering of a format that is not text. Unreachable
+    /// through the app, which routes binary formats to `Exporter.data`; here so
+    /// that `text` fails honestly rather than returning a string that is not the
+    /// file the caller asked for.
+    case notATextFormat
 }
 
 /// Serialises extracted curves. Pure string building — no file I/O, so the
@@ -61,7 +77,27 @@ public enum Exporter {
             return try dxf(populated, calibration: calibration)
         case .eps:
             return try eps(populated, calibration: calibration)
+        case .xlsx:
+            throw ExportError.notATextFormat
         }
+    }
+
+    /// The bytes to write for any format, text or binary.
+    ///
+    /// The single entry point for the save panel, so the caller writes `Data`
+    /// either way and never has to know which formats happen to be text. Kept
+    /// beside `text` rather than replacing it because the clipboard path only
+    /// ever wants TSV, and handing it `Data` to then decode would be a round trip
+    /// through an encoding nobody chose.
+    public static func data(for lines: [CurveLine],
+                            calibration: CalibrationMap?,
+                            format: ExportFormat,
+                            includeHeader: Bool = true) throws -> Data {
+        if format == .xlsx {
+            return try XLSXWriter.data(for: lines, calibration: calibration)
+        }
+        return Data(try text(for: lines, calibration: calibration,
+                             format: format, includeHeader: includeHeader).utf8)
     }
 
     /// Value for a point, used by the numeric formats.
@@ -89,7 +125,11 @@ public enum Exporter {
     }
 
     /// Decimal places that keep full precision without printing noise.
-    private static func decimal(_ v: Double) -> String {
+    ///
+    /// Shared with `XLSXWriter` on purpose: the number in the workbook is the
+    /// number in the CSV, so a user comparing the two does not have to wonder
+    /// which export is the accurate one.
+    static func decimal(_ v: Double) -> String {
         if v == 0 { return "0" }
         let magnitude = abs(v)
         if magnitude >= 1e6 || magnitude < 1e-4 {

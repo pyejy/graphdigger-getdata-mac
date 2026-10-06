@@ -88,6 +88,34 @@ enum SelfTest {
             check("XML 导出可解析", false, "抛出 \(error)")
         }
 
+        // The workbook leaves as bytes, not text, so it is checked as bytes: the
+        // ZIP prologue a reader looks for and the parts an OOXML package must
+        // contain. What is *inside* those parts is asserted in `XLSXTests`,
+        // against the same writer.
+        do {
+            let workbook = try Exporter.data(for: state.lines,
+                                             calibration: calibration,
+                                             format: .xlsx)
+            let parts = ["[Content_Types].xml", "xl/workbook.xml", "xl/worksheets/sheet1.xml"]
+            let missing = parts.filter { workbook.range(of: Data($0.utf8)) == nil }
+            let startsWithZip = Array(workbook.prefix(4)) == [0x50, 0x4B, 0x03, 0x04]
+            let endsWithDirectory = workbook.count > 22
+                && Array(workbook.suffix(22).prefix(4)) == [0x50, 0x4B, 0x05, 0x06]
+            let ok = startsWithZip && endsWithDirectory && missing.isEmpty
+            check("XLSX 导出是真 ZIP 容器,OOXML 部件齐全", ok,
+                  ok ? "\(workbook.count) 字节 · 本地头 PK\u{03}\u{04} · 部件 \(parts.count) 个齐全"
+                     : "ZIP头=\(startsWithZip) 结束记录=\(endsWithDirectory) 缺=\(missing)")
+
+            do {
+                _ = try Exporter.text(for: state.lines, calibration: calibration, format: .xlsx)
+                check("XLSX 不会被文本通道误当成字符串", false, "文本通道竟然答应了")
+            } catch ExportError.notATextFormat {
+                check("XLSX 不会被文本通道误当成字符串", true)
+            }
+        } catch {
+            check("XLSX 导出是真 ZIP 容器,OOXML 部件齐全", false, "抛出 \(error)")
+        }
+
         // --- PNG round trip through the real decode path -------------------
         // Everything above used the in-memory buffer. This leg goes out to a
         // PNG and back through the same NSImage/CGImage conversion the app uses
@@ -708,6 +736,18 @@ enum SelfTest {
         check("网格间距决定区域取点的点数(粗 ⊂ 细)", gridDensity.passed, gridDensity.detail)
         let traceDensity = traceSpacingThinsTheTracedCurve()
         check("取点密度只抽稀自动跟踪的点,不改路线", traceDensity.passed, traceDensity.detail)
+
+        // --- 网格方向与偏移(FR-5.4 / FR-5.5)--------------------------------
+        // The sweeps themselves are unit-tested against hand-built masks in
+        // `DigitizerTests`. What is left for here is the wiring: that the menu's
+        // direction reaches the digitizer at all, and that aligning the grid
+        // moves the lines to the pixel it was asked for — both asserted on the
+        // coordinates that come back, not on the setting that was stored, because
+        // a setting that changed nothing on screen would pass the latter.
+        let gridDirection = gridAxisReachesTheDigitizer()
+        check("网格方向真的是换了一套扫描(落格坐标随之换轴)", gridDirection.passed, gridDirection.detail)
+        let gridAlignment = aligningTheGridPutsTheLinesOnTheAnchor()
+        check("网格对齐到坐标轴起点后,扫描线穿过该列", gridAlignment.passed, gridAlignment.detail)
 
         // --- sidebar ---------------------------------------------------------
         // The panel is where the live coordinates are read, so it has to hold
@@ -2420,6 +2460,102 @@ enum SelfTest {
         return (passed, passed
             ? "换图前可撤可重做,换图后两侧都清空"
             : "换图后仍可撤销=\(probe.canvas.canUndo) 重做=\(probe.canvas.canRedo)")
+    }
+
+    // MARK: - 网格方向与偏移 (grid axis & phase)
+
+    /// Both directions, swept once each through the real canvas.
+    ///
+    /// Shared by the two checks below: everything about them is the same except
+    /// what is asserted afterwards.
+    private static func sweepWithGrid(_ canvas: CanvasView, line id: UUID,
+                                      width: Int, height: Int) -> [PixelPoint]? {
+        canvas.clearPoints(of: id)
+        canvas.tool = .gridDigitize
+        canvas.selectLine(id: id)
+        guard let down = dragEvent(canvas, .leftMouseDown, CGPoint(x: 2, y: 2)),
+              let drag = dragEvent(canvas, .leftMouseDragged,
+                                   CGPoint(x: Double(width - 2), y: Double(height - 2))),
+              let up = dragEvent(canvas, .leftMouseUp,
+                                 CGPoint(x: Double(width - 2), y: Double(height - 2)))
+        else { return nil }
+        canvas.mouseDown(with: down)
+        canvas.mouseDragged(with: drag)
+        canvas.mouseUp(with: up)
+        let points = canvas.state.lines.first(where: { $0.id == id })?.points
+        return (points?.isEmpty ?? true) ? nil : points
+    }
+
+    /// Turning the grid a quarter turn actually changes what gets scanned.
+    ///
+    /// Read off the coordinates rather than the stored setting. An X grid's
+    /// points sit on a **column** lattice and have arbitrary rows; a Y grid's are
+    /// the other way round — so which of the two coordinates is on the lattice,
+    /// and which is a run mean ending in .5, says which sweep really ran. A menu
+    /// item wired to the setting but not to the digitizer would satisfy a check on
+    /// the setting and change nothing on screen.
+    private static func gridAxisReachesTheDigitizer() -> (passed: Bool, detail: String) {
+        guard let probe = singleCurveCanvas(), let buffer = probe.canvas.buffer else {
+            return (false, "无法构建画布")
+        }
+        let canvas = probe.canvas
+        let dx = canvas.state.gridSpacing
+        let width = buffer.width, height = buffer.height
+
+        canvas.setGridAxis(.x)
+        guard let byColumn = sweepWithGrid(canvas, line: probe.id, width: width, height: height)
+        else { return (false, "X 网格没取到点") }
+        canvas.setGridAxis(.y)
+        guard let byRow = sweepWithGrid(canvas, line: probe.id, width: width, height: height)
+        else { return (false, "Y 网格没取到点") }
+
+        let columnsOnLattice = byColumn.allSatisfy { Int($0.x) % dx == 0 }
+        let rowsOnLattice = byRow.allSatisfy { Int($0.y) % dx == 0 }
+        // And the other coordinate must *not* be on a lattice — otherwise both
+        // sweeps would be producing squares, which no scan line does.
+        let columnRunMeans = byColumn.contains { $0.y != $0.y.rounded() }
+        let rowRunMeans = byRow.contains { $0.x != $0.x.rounded() }
+        let passed = columnsOnLattice && rowsOnLattice && columnRunMeans && rowRunMeans
+        return (passed, passed
+            ? "X 网格 \(byColumn.count) 点的列都在 \(dx) 的整数倍上;"
+                + "Y 网格 \(byRow.count) 点的行都在 \(dx) 的整数倍上,游程均值落在半像素"
+            : "X 落列=\(columnsOnLattice) Y 落行=\(rowsOnLattice)"
+                + " · X 游程均值=\(columnRunMeans) Y 游程均值=\(rowRunMeans)")
+    }
+
+    /// 「对齐到坐标轴起点」puts a scan line on the anchor's own column.
+    ///
+    /// The anchors are deliberately placed off any multiple of the spacing, so an
+    /// implementation that ignored the alignment and left the phase at zero cannot
+    /// pass by luck.
+    private static func aligningTheGridPutsTheLinesOnTheAnchor() -> (passed: Bool, detail: String) {
+        guard let probe = singleCurveCanvas(), let buffer = probe.canvas.buffer else {
+            return (false, "无法构建画布")
+        }
+        let canvas = probe.canvas
+        let anchors = CalibrationAnchors(xStart: PixelPoint(x: 46, y: 560),
+                                         xEnd: PixelPoint(x: 840, y: 560),
+                                         yStart: PixelPoint(x: 46, y: 560),
+                                         yEnd: PixelPoint(x: 46, y: 60))
+        canvas.applyCalibration(anchors: anchors,
+                                xStartValue: 0, xEndValue: 10,
+                                yStartValue: 0, yEndValue: 5,
+                                xIsLogarithmic: false, yIsLogarithmic: false)
+        let dx = canvas.state.gridSpacing
+        canvas.setGridAxis(.x)
+        canvas.alignGrid(toPixel: anchors.xStart.x, spacing: dx)
+
+        guard let points = sweepWithGrid(canvas, line: probe.id,
+                                         width: buffer.width, height: buffer.height)
+        else { return (false, "对齐后没取到点") }
+        let phase = canvas.state.areaDigitizingGrid.phase
+        let onTheLattice = points.allSatisfy { Int($0.x) % dx == phase }
+        let moved = phase != 0
+        let passed = onTheLattice && moved
+        return (passed, passed
+            ? "锚点列 \(Int(anchors.xStart.x)) → 相位 \(phase);"
+                + "\(points.count) 个点全部落在 \(phase)+\(dx)k 上"
+            : "相位 \(phase)(不该为 0)· 全部落线=\(onTheLattice)")
     }
 
     // MARK: - 项目文件 (project files)

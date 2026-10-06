@@ -32,6 +32,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var undoMenuItem: NSMenuItem!
     private var redoMenuItem: NSMenuItem!
 
+    /// The two grid-direction entries, so `refreshUI` can put the tick on the one
+    /// in force. A submenu is the only place on screen that says which way the
+    /// grid currently runs — the strip's readout is 58pt wide and holds a number,
+    /// not a word.
+    private var gridAxisItems: [GridAxis: NSMenuItem] = [:]
+
     /// The project file this document was opened from, or last saved to.
     ///
     /// Nil after opening a bare image and before the first save: `⌘S` then has
@@ -311,6 +317,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         action: #selector(setGridSpacing(_:)), keyEquivalent: "")
         opsMenu.addItem(withTitle: "取点密度 (Trace Density)…",
                         action: #selector(setTraceSpacing(_:)), keyEquivalent: "")
+
+        // The grid's two shape options sit beside its spacing, because all three
+        // are what the next 框选 will do and none of them applies to any other
+        // tool. The direction is a submenu with a tick rather than a pair of
+        // commands because it is a mode the user needs to *read back* — 「现在是
+        // 哪种网格」 has no other answer on screen, and the strip's readout has 58
+        // points of width, which is not enough for the word.
+        let gridItem = NSMenuItem(title: "网格方向 (Grid Axis)", action: nil, keyEquivalent: "")
+        let gridMenu = NSMenu(title: "Grid Axis")
+        for axis in GridAxis.allCases {
+            let item = NSMenuItem(title: axis.displayName,
+                                  action: #selector(setGridAxis(_:)), keyEquivalent: "")
+            item.representedObject = axis.rawValue
+            item.toolTip = axis.hint
+            gridMenu.addItem(item)
+            gridAxisItems[axis] = item
+        }
+        gridItem.submenu = gridMenu
+        opsMenu.addItem(gridItem)
+        opsMenu.addItem(withTitle: "网格对齐到坐标轴起点 (Align Grid to Axis Origin)",
+                        action: #selector(alignGridToAxisOrigin(_:)), keyEquivalent: "")
+        opsMenu.addItem(withTitle: "网格偏移 (Grid Phase)…",
+                        action: #selector(setGridPhase(_:)), keyEquivalent: "")
         opsItem.submenu = opsMenu
 
         // ---- View --------------------------------------------------------
@@ -569,11 +598,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func performExport(format: ExportFormat, relativeTo sender: NSView?) {
-        let text: String
+        // Bytes rather than text: the workbook is a ZIP, and routing every format
+        // through one call is what keeps the save panel from having to know which
+        // formats happen to be strings.
+        let payload: Data
         do {
-            text = try Exporter.text(for: canvas.state.lines,
-                                     calibration: canvas.state.calibration,
-                                     format: format)
+            payload = try Exporter.data(for: canvas.state.lines,
+                                        calibration: canvas.state.calibration,
+                                        format: format)
         } catch {
             presentExportError(error)
             return
@@ -583,7 +615,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.nameFieldStringValue = "digitized.\(format.fileExtension)"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
-            try text.write(to: url, atomically: true, encoding: .utf8)
+            try payload.write(to: url, options: .atomic)
             refreshUI("已导出到 \(url.lastPathComponent)")
         } catch {
             presentError("写入失败:\(error.localizedDescription)")
@@ -794,6 +826,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refreshUI("取点密度 = 每 \(canvas.state.traceSpacing) px 一点")
     }
 
+    /// Turns the area grid a quarter turn — FR-5.4.
+    ///
+    /// Reported through the status line rather than a dialog because it changes
+    /// what the *next* pass does, and the picture on screen does not move: without
+    /// a word the click would be indistinguishable from one that failed, which is
+    /// the same reason 适配窗口 answers even when it has nothing to do.
+    @objc private func setGridAxis(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let axis = GridAxis(rawValue: raw) else { return }
+        canvas.setGridAxis(axis)
+        refreshUI("\(axis.displayName) —— \(axis.hint)")
+    }
+
+    /// Slides the grid so a scan line lands on the coordinate system's own start.
+    ///
+    /// This is the alignment that matters in practice. Samples are useful when
+    /// they land on round data values, and the axis origin is the one pixel the
+    /// app already knows the value of — so put a line there and every further
+    /// line is a whole spacing away from it. Doing it by hand would mean reading
+    /// a pixel off the chart and working out a residue modulo the spacing, which
+    /// is exactly the arithmetic this can get wrong on the user's behalf.
+    @objc private func alignGridToAxisOrigin(_ sender: Any?) {
+        guard let anchors = canvas.state.calibrationAnchors else {
+            presentError("还没有标定坐标系,网格不知道该对齐到哪一列。请先点「标定坐标系」建立坐标系。")
+            return
+        }
+        let axis = canvas.state.areaDigitizingGrid.axis
+        // An X grid's lines are columns, so the origin it aligns to is the column
+        // the X axis starts at; a Y grid's are rows, so it is the Y axis' start
+        // row. Taking the other one would line the grid up with a coordinate the
+        // scans never touch.
+        let pixel = axis == .x ? anchors.xStart.x : anchors.yStart.y
+        canvas.alignGrid(toPixel: pixel, spacing: canvas.state.gridSpacing)
+        refreshUI("网格已对齐到\(axis == .x ? "X 轴起点所在的列" : "Y 轴起点所在的行")"
+            + "(第 \(Int(pixel.rounded())) 像素)")
+    }
+
+    /// The typed route to the grid's phase — FR-5.5.
+    @objc private func setGridPhase(_ sender: Any?) {
+        let dx = max(1, canvas.state.gridSpacing)
+        guard let value = promptForNumber(title: "网格偏移",
+                                          message: "扫描线落在哪些像素上:线位于「偏移 + 间距 × 整数」。"
+                                              + "可填 0 到 \(dx - 1);再大就与下一个间距重合了。",
+                                          current: Double(canvas.state.areaDigitizingGrid.phase),
+                                          minimum: 0, maximum: Double(dx - 1)) else { return }
+        canvas.alignGrid(toPixel: value, spacing: dx)
+        refreshUI("网格偏移 = \(canvas.state.areaDigitizingGrid.phase) px")
+    }
+
     @objc private func setTolerance(_ sender: Any?) {
         guard let value = promptForNumber(title: "颜色容差",
                                           message: "判定「属于曲线」的颜色距离阈值。曲线没取全就调大,取进太多杂点就调小。",
@@ -909,6 +990,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 status.append("点重排:当前曲线不到 2 个点,先取点再扫")
             }
         }
+        // The grid tools set things the picture does not show: which way the scan
+        // lines run, how far apart they are, and which pixels they land on. A user
+        // who turned the grid a quarter turn and saw the canvas not move has no
+        // way to tell a mode change from a dead menu item — the same gap the
+        // reorder progress above fills. The strip's own readout cannot carry it:
+        // that slot holds `间距 8px` in 58 points and a word would be clipped.
+        if canvas.tool == .gridDigitize || canvas.tool == .redigitize {
+            let grid = canvas.state.areaDigitizingGrid
+            status.append("\(grid.axis.displayName) · 间距 \(canvas.state.gridSpacing)px"
+                + " · 偏移 \(grid.phase)px")
+        }
         if let extra { status.append(extra) }
         if hasUnsavedChanges { status.append("未保存") }
         if !hasImage { status.append("拖入图片也可以打开") }
@@ -933,6 +1025,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         undoMenuItem.isEnabled = canvas.canUndo
         redoMenuItem.title = canvas.redoLabel.map { "重做 \($0)" } ?? "重做"
         redoMenuItem.isEnabled = canvas.canRedo
+
+        // The tick on the grid direction. Written here rather than in
+        // `validateMenuItem` because this already runs on every state change and
+        // two readers of the same setting is how they end up disagreeing.
+        for (axis, item) in gridAxisItems {
+            item.state = canvas.state.areaDigitizingGrid.axis == axis ? .on : .off
+        }
 
         // Last, and deliberately: the title and the edited dot are read off the
         // state this method has just finished rebuilding the other views from, so
