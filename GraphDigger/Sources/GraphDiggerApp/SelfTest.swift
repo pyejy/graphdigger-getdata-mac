@@ -731,6 +731,9 @@ enum SelfTest {
         let systems = twoCoordinateSystemsConvertTheirOwnCurves()
         check("同一张图两套坐标系:每条曲线按自己那套换算,选中曲线即切换,挂曲线的删不掉",
               systems.passed, systems.detail)
+        let armsCalibration = addingASystemArmsCalibration()
+        check("新增坐标系后自动切到「标定坐标系」(取点中也不例外)",
+              armsCalibration.passed, armsCalibration.detail)
 
         // --- 两个「用来看」的视图(FR-1.3 / FR-7.1)-----------------------------
         let hideImage = hidingTheImageTakesNothingAway()
@@ -3079,6 +3082,29 @@ enum SelfTest {
                 + " 勾在活跃=\(tickOnActive) 跟随选中=\(followsSelection)"
                 + " 拒绝删除=\(refused) 挪走=\(moved) 删掉=\(deleted) 剩一套=\(oneLeft)"
                 + " 侧栏权威=\(sidebarAuthoritative)[x=\(xText ?? "nil") 头=\(sideHeading ?? "nil")]")
+    }
+
+    /// Adding a coordinate system must arm the calibration tool, whatever tool
+    /// was in hand. The user reported the hole from life: they were mid-取点,
+    /// added a system for the next panel, and the app left them in 取点 — so
+    /// the next clicks would have taken points against a system with no axes,
+    /// producing numbers with no meaning. Driven on the real canvas with the
+    /// tool deliberately set to a digitising one first.
+    private static func addingASystemArmsCalibration() -> (passed: Bool, detail: String) {
+        let delegate = AppDelegate()
+        delegate.buildMenu()
+        delegate.buildWindow()
+        guard let canvas = delegate.canvas else { return (false, "画布没建出来") }
+
+        canvas.tool = .traceDigitize
+        let before = canvas.tool
+        canvas.addCoordinateSystem()
+        let armed = canvas.tool == .setScale
+        let systemsGrew = canvas.state.systems.count == 2
+        let passed = before == .traceDigitize && armed && systemsGrew
+        return (passed, passed
+            ? "取点中新增坐标系 → 工具切到标定,系统数 1→2"
+            : "before=\(before) after=\(canvas.tool) 系统数=\(canvas.state.systems.count)")
     }
 
     // MARK: - 符号匹配 (scatter symbols)

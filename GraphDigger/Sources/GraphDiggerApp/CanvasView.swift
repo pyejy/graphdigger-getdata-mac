@@ -1028,6 +1028,13 @@ final class CanvasView: NSView {
     func addCoordinateSystem() -> UUID {
         var id = UUID()
         perform("新增坐标系") { id = $0.addCoordinateSystem() }
+        // The next thing the user does with a fresh system is calibrate it —
+        // it exists because the next panel has different axes, and it has no
+        // mapping yet. Staying in whatever tool was in hand (取点 included)
+        // would let points be taken against a system with no axes: the clicks
+        // land, and the numbers are wrong. The tool is navigation, not data,
+        // so this switch stays out of the undo history like every other.
+        tool = .setScale
         needsDisplay = true
         delegate?.canvasDidChangeState(self)
         return id

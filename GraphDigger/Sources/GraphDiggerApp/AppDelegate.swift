@@ -1057,7 +1057,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let id = canvas.addCoordinateSystem()
         let ordinal = canvas.state.ordinal(ofSystem: id) ?? canvas.state.systems.count
-        refreshUI("已新增坐标系 \(ordinal) —— 接着标定它 (⌥⌘S),之后新建的曲线都归它")
+        refreshUI("已新增坐标系 \(ordinal) —— 已切换到「标定坐标系」,在它自己的轴上点 4 个点")
     }
 
     /// Deletes the active system, refusing while curves are still measured in it.
