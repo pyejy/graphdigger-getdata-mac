@@ -1184,8 +1184,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 报数,不报状态:一次误判要是无声的,用户只会看到"少了几段点"。
         // 数报了,误判就是看得见的事。
         if let outcome = canvas.activeGridOutcome, !outcome.isEmpty {
-            refreshUI("已去除网格线:\(outcome.columns.count) 条竖线 + \(outcome.rows.count) 条横线"
-                + "(共 \(outcome.removedPixels) 像素)—— 现在重新取点生效")
+            // 报的是**当前曲线**的遮膜,所以把曲线名字带上 —— 多曲线工程里
+            // 不说清楚,用户会以为整张图都清了。
+            let name = canvas.state.activeLine?.name ?? "当前曲线"
+            refreshUI("「\(name)」的遮膜已去掉网格线:\(outcome.columns.count) 条竖线"
+                + " + \(outcome.rows.count) 条横线(共 \(outcome.removedPixels) 像素)"
+                + " —— 重新取点生效")
         } else {
             refreshUI("已打开网格线去除 —— 这张图上没找到等距网格线"
                 + "(曲线还没取色时先「取色」,或者它本来就没有网格)")
@@ -1782,6 +1786,14 @@ extension AppDelegate: CanvasViewDelegate {
 
     func canvas(_ canvas: CanvasView, didFailWith message: String) {
         presentError(message)
+    }
+
+    func canvas(_ canvas: CanvasView, didInvalidateErrorBars lineName: String) {
+        // 数据的消失必须说出来:把点拖到更正的位置是对的,但那根棒还在图上原处,
+        // 于是存下来的"点到横杠的距离"不再成立 —— 整组作废比错位好,而用户得
+        // 知道它为什么没了。
+        refreshUI("「\(lineName)」的点被移动,误差棒已作废(它量的是图上原来的位置)"
+            + " —— 重新点「提取误差棒」即可再量")
     }
 
     func canvas(_ canvas: CanvasView, didRedigitize lineName: String, removed: Int, added: Int) {

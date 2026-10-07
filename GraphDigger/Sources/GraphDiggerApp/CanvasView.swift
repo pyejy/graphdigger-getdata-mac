@@ -204,6 +204,12 @@ protocol CanvasViewDelegate: AnyObject {
     func canvas(_ canvas: CanvasView, didCollectScalePoints anchors: CalibrationAnchors)
     func canvasDidChangeState(_ canvas: CanvasView)
     func canvas(_ canvas: CanvasView, didFailWith message: String)
+    /// 误差棒因为点被改动而作废(B-2)。
+    ///
+    /// 单独一条通道,因为这是**数据的消失**而不是一次操作的结果:误差棒按
+    /// 键位对齐,点一移动就不再对应图上的那根墨迹,所以整组作废 —— 但它不像
+    /// 撤销那样有可见的动作,不报出来用户只会发现"导出少了两列"。
+    func canvas(_ canvas: CanvasView, didInvalidateErrorBars lineName: String)
     /// A re-digitise pass finished. Separate from the message channel because a
     /// pass that worked has something to report and is not a failure — the info
     /// bar should say what it took and what it put back.
@@ -471,6 +477,7 @@ final class CanvasView: NSView {
 
     private func beginGesture() {
         gestureBefore = state
+        reportedDroppedErrorBars = false
     }
 
     /// Closes the gesture and records it as one step.
@@ -783,6 +790,10 @@ final class CanvasView: NSView {
     }
 
     // MARK: - Interaction scratch
+
+    /// 这一段拖动是否已经把"误差棒作废"报过一次(B-2)。每次按下清掉 ——
+    /// 一秒内拖十个点,用户该收到十次通知,而不是十行相同的字。
+    private var reportedDroppedErrorBars = false
 
     private var dragRect: CGRect?          // grid/redigitise rubber band, in image space
     private var isPanning = false
@@ -2785,7 +2796,15 @@ final class CanvasView: NSView {
     private func dragEditedPoint(to viewPoint: CGPoint) {
         guard let id = state.activeLineID, let index = draggingPointStoredIndex else { return }
         let target = clampedToImage(transform.imagePoint(fromView: viewPoint))
+        let line = state.lines.first(where: { $0.id == id })
+        let hadBars = line?.hasErrorBars ?? false
         guard state.movePoint(of: id, at: index, to: target) else { return }
+        // 拖动的第一步就会让误差棒整组作废(见 `CurveLine.points`)——报一次,
+        // 每段拖动只报一次,不然鼠标每动一像素都会刷屏。
+        if hadBars, !reportedDroppedErrorBars {
+            reportedDroppedErrorBars = true
+            delegate?.canvas(self, didInvalidateErrorBars: line?.name ?? "当前曲线")
+        }
         needsDisplay = true
         delegate?.canvasDidChangeState(self)
     }

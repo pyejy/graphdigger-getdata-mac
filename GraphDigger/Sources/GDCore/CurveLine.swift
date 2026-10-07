@@ -44,11 +44,14 @@ public struct CurveLine: Identifiable, Equatable, Codable, Sendable {
 
     /// Points in the order they were taken — the raw record.
     ///
-    /// 点一变(插入、删除、重新取点),按位置对齐的误差棒就整组作废 —— 见
-    /// `errorBars` 的不变量。
+    /// **点一动,误差棒就整组作废** —— 不只是数量变了才作废。误差棒是**图上**
+    /// 的墨迹:拖动一个点之后,"从这个点量到横杠的距离"已经不是存下来的那个数,
+    /// 而数字看着完全正常。这也正是 `errorBars` 那条不变量存在的理由 ——
+    /// 按键位对齐的数据,错位比丢失更坏。(撤销会连误差棒一起还原,因为整份
+    /// 状态是一起快照的。)
     public var points: [PixelPoint] {
         didSet {
-            if let bars = errorBars, bars.count != points.count { errorBars = nil }
+            if errorBars != nil, oldValue != points { errorBars = nil }
         }
     }
     public var isVisible: Bool

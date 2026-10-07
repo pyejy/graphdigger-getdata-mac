@@ -91,4 +91,24 @@ final class ErrorBarExportTests: XCTestCase {
         XCTAssertNil(line.errorBars, "点被删掉后误差还留着 —— 它们会安到错误的点上")
         XCTAssertFalse(line.hasErrorBars)
     }
+
+    /// **移动**一个点(与拖动等价)同样要作废,哪怕点数没变。
+    ///
+    /// 这是复核时抓到的一个真 bug:原先的不变量只查长度,而拖动改的是坐标 ——
+    /// 于是误差棒留着不动。可它量的是**图上那根墨迹**到点的距离,点一挪,
+    /// 那个数就不再成立,而数字看上去完全正常。
+    func testMovingAPointAlsoDropsTheBars() {
+        var (line, _) = chart()
+        XCTAssertTrue(line.hasErrorBars)
+        line.points[0] = PixelPoint(x: line.points[0].x + 12, y: line.points[0].y)
+        XCTAssertNil(line.errorBars, "点被移动后误差还留着 —— 那些值已不对应图上那根棒")
+    }
+
+    /// 写入同一批点的坐标(内容没变)不该作废 —— 否则每次重绘都可能悄悄丢掉误差。
+    func testWritingTheSamePointsKeepsTheBars() {
+        var (line, _) = chart()
+        let unchanged = line.points
+        line.points = unchanged
+        XCTAssertTrue(line.hasErrorBars, "坐标内容没变,误差却被丢掉了")
+    }
 }

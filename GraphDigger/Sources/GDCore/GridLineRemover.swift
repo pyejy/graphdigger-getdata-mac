@@ -92,8 +92,8 @@ public enum GridLineRemover {
         -> (mask: ForegroundMask, outcome: Outcome) {
         var out = mask
 
-        let columns = gridLines(in: &out, parameters: parameters, isColumn: true)
-        let rows = gridLines(in: &out, parameters: parameters, isColumn: false)
+        let columns = gridLines(in: out, parameters: parameters, isColumn: true)
+        let rows = gridLines(in: out, parameters: parameters, isColumn: false)
         var removed = 0
         for line in columns {
             removed += erase(&out, centre: line.centre, width: line.width,
@@ -111,7 +111,12 @@ public enum GridLineRemover {
     // MARK: - Finding the lines
 
     /// The columns (or rows) that pass the projection and belong to a family.
-    private static func gridLines(in mask: inout ForegroundMask,
+    ///
+    /// Reads the mask, does not touch it: `remove` calls this twice, and the
+    /// second call seeing the state *after* the columns went is what lets a
+    /// grid's rows be judged on their own ink rather than on what the crossing
+    /// columns contributed.
+    private static func gridLines(in mask: ForegroundMask,
                                   parameters: Parameters,
                                   isColumn: Bool) -> [Line] {
         let span = isColumn ? mask.height : mask.width

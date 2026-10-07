@@ -1516,6 +1516,7 @@ enum SelfTest {
             if let prompt = canvas.scalePrompt { prompts.append(prompt) }
         }
         func canvas(_ canvas: CanvasView, didFailWith message: String) {}
+        func canvas(_ canvas: CanvasView, didInvalidateErrorBars lineName: String) {}
     }
 
     // MARK: - Calibration overlay, on rendered pixels
