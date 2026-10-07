@@ -332,6 +332,7 @@ public enum SyntheticChart {
         up: (Int) -> Double = { _ in 26 },
         down: (Int) -> Double = { _ in 26 },
         withErrorBars: Bool = true,
+        barColor: RGB8? = nil,
         capHalfWidth: Int = 5,
         stemWidth: Int = 2,
         markerDiameter: Int = 9) -> ErrorBarChart {
@@ -380,13 +381,16 @@ public enum SyntheticChart {
 
             if withErrorBars {
                 // 棒身:以点为中线的一段竖线(棒身宽度从点的中心向两侧铺开)。
+                // 棒的颜色可与曲线不同 —— 彩色曲线配黑色误差棒是真实图里最常见
+                // 的组合之一,也正是"一个都没找到"的头号原因。
+                let ink = barColor ?? curveColor
                 let half = max(0, (stemWidth - 1) / 2)
                 let top = py - Int(upLen.rounded())
                 let bottom = py + Int(downLen.rounded())
-                fillRect(px - half, px + half, top, bottom, curveColor)
+                fillRect(px - half, px + half, top, bottom, ink)
                 // 上下横杠。
-                fillRect(px - capHalfWidth, px + capHalfWidth, top, top + 1, curveColor)
-                fillRect(px - capHalfWidth, px + capHalfWidth, bottom - 1, bottom, curveColor)
+                fillRect(px - capHalfWidth, px + capHalfWidth, top, top + 1, ink)
+                fillRect(px - capHalfWidth, px + capHalfWidth, bottom - 1, bottom, ink)
             }
             // 标记画在最后:它盖住棒身中段,与真实图一致(点压在棒上)。
             let r = markerDiameter / 2

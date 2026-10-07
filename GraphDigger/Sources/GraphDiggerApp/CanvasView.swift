@@ -329,6 +329,27 @@ final class CanvasView: NSView {
         return result
     }
 
+    /// 「为什么一个都没找到」的探查(B-2)。
+    ///
+    /// 用**颜色无关**的墨迹遮膜再扫一遍:找到了,说明棒有、只是颜色不是曲线的;
+    /// 还是没找到,说明这些点旁边真的没有棒的结构。这两种原因的处置完全不同,
+    /// 而它们共用同一句"没找到"时,用户只能猜。
+    func errorBarDiagnosis() -> String {
+        guard let buffer, let id = state.activeLineID,
+              let line = state.lines.first(where: { $0.id == id }),
+              !line.points.isEmpty else { return "" }
+        let background = line.backgroundColor ?? state.defaultBackgroundColor
+            ?? RGB8(r: 255, g: 255, b: 255)
+        let ink = ErrorBarScanner.inkMask(from: buffer, background: background)
+        let anyColour = ErrorBarScanner.scan(points: line.points, mask: ink)
+        if anyColour.found > 0 {
+            return "—— 但点在**这个颜色的**遮膜里找不到棒:这些棒多半不是曲线颜色"
+                + "(彩色曲线配黑色误差棒很常见)。用「取色」对着棒取一次色,或把「颜色容差」调大再试。"
+        }
+        return "—— 这些点旁边没有误差棒的结构:这张图可能本来没画误差棒,"
+            + "或者点取在棒身之外(棒通常从点向上/向下伸)。"
+    }
+
     /// 清掉当前曲线的误差棒。点不动 —— 只丢那两列。
     func clearErrorBars() {
         guard let id = state.activeLineID,

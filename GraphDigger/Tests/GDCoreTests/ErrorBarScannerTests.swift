@@ -85,6 +85,36 @@ final class ErrorBarScannerTests: XCTestCase {
         XCTAssertEqual(result.found, 0, "超长棒被报成了误差棒")
     }
 
+    /// **用户实际遇到的那种情况**:棒与曲线不同色(黑色棒 + 彩色曲线)。
+    ///
+    /// 用曲线的遮膜扫,一个都找不到 —— 这不是提取坏了,而是它只认曲线那一种颜色。
+    /// 此时"颜色无关"的墨迹遮膜必须能找出来,否则工具无法回答"是没有棒,还是
+    /// 棒不是这个颜色",用户只能猜。
+    func testDiagnosesBarsDrawnInADifferentColour() {
+        let chart = SyntheticChart.renderErrorBars(count: 5, barColor: RGB8(r: 25, g: 25, b: 25))
+
+        // 曲线的遮膜:找不到 —— 但点的位置本身在曲线上(标记是彩色的),所以
+        // 这正是用户看到 0/N 的那一幕。
+        let curveMask = ForegroundMask.build(from: chart.buffer,
+                                             lineColor: chart.lineColor, tolerance: 60)
+        let asCurve = ErrorBarScanner.scan(points: chart.points, mask: curveMask)
+        XCTAssertEqual(asCurve.found, 0, "黑色的棒不该出现在曲线颜色的遮膜里")
+
+        // 颜色无关的墨迹遮膜:找得到 —— 于是可以断定"棒有,只是颜色不对"。
+        let ink = ErrorBarScanner.inkMask(from: chart.buffer, background: chart.backgroundColor)
+        let asInk = ErrorBarScanner.scan(points: chart.points, mask: ink)
+        XCTAssertEqual(asInk.found, chart.points.count,
+                       "墨迹遮膜应当认出这些棒,好把原因说清楚")
+    }
+
+    /// 颜色无关的遮膜**不能**把纯散点图认成有误差棒 —— 那会把诊断指向错误的结论。
+    func testInkMaskDoesNotInventBarsOnAPlainScatter() {
+        let chart = SyntheticChart.renderErrorBars(count: 6, withErrorBars: false)
+        let ink = ErrorBarScanner.inkMask(from: chart.buffer, background: chart.backgroundColor)
+        let result = ErrorBarScanner.scan(points: chart.points, mask: ink)
+        XCTAssertEqual(result.found, 0, "纯散点被墨迹遮膜认成了有误差棒")
+    }
+
     /// 逐点给不同长度,验证"一对一到人"没错位。
     func testKeepsOffsetsAlignedWithTheirPoints() {
         let lengths: [Double] = [10, 22, 34, 18, 40, 26]

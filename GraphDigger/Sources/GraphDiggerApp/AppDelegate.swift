@@ -1158,7 +1158,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             message += " · 其中 \(result.halfBars) 个只量到一半(另一端的横杠常被曲线压住)"
         }
         if result.found == 0 {
-            message += " —— 这些点旁边没有误差棒,或者棒与曲线不同色(先「取色」对准它)"
+            // 两种原因(本来没画 / 棒不是曲线颜色)处置完全不同 —— 让工具自己答。
+            message += "\n" + canvas.errorBarDiagnosis()
         } else {
             message += " —— 导出会多出 yErrLow / yErrHigh 两列"
         }

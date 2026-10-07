@@ -83,6 +83,33 @@ public enum ErrorBarScanner {
         public init() {}
     }
 
+    /// 颜色无关的"有墨"遮膜:凡是明显不同于背景的像素。
+    ///
+    /// 它的用处只有一个,但很要紧 —— 回答「为什么一个都没找到」:是这张图本来
+    /// 没画误差棒,还是**棒有、只是不是曲线的颜色**(彩色曲线配黑色误差棒极常见,
+    /// 而取点用的遮膜只认曲线那一种颜色)。没有这一层,两种完全不同的原因会共用
+    /// 同一句"没找到",用户只能猜。
+    public static func inkMask(from buffer: BitmapBuffer, background: RGB8,
+                               threshold: Double = 60) -> ForegroundMask {
+        let n = buffer.width * buffer.height
+        var bits = [Bool](repeating: false, count: n)
+        let br = Double(background.r), bg = Double(background.g), bb = Double(background.b)
+        let limit = threshold * threshold
+        buffer.pixels.withUnsafeBufferPointer { px in
+            bits.withUnsafeMutableBufferPointer { out in
+                for i in 0..<n {
+                    let base = i * 3
+                    let dr = Double(px[base]) - br
+                    let dg = Double(px[base + 1]) - bg
+                    let db = Double(px[base + 2]) - bb
+                    // 与曲线无关的加权距离:任何"够暗/够有色"的东西都算墨。
+                    out[i] = (2 * dr * dr + 4 * dg * dg + 3 * db * db) > limit
+                }
+            }
+        }
+        return ForegroundMask(width: buffer.width, height: buffer.height, bits: bits)
+    }
+
     /// 对给定的点逐个找误差棒。
     ///
     /// `points` 是要量的位置(像素),`mask` 是曲线颜色的遮膜 —— 用遮膜而不是
