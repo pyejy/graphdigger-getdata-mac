@@ -52,9 +52,16 @@ public enum ErrorBarScanner {
     }
 
     public struct Parameters: Sendable {
-        /// 沿着棒走多远还没遇到横杠就放弃,像素。误差棒一般不会长过图高的
-        /// 三分之一;再长就更可能是曲线的一段或坐标轴。
+        /// 沿着棒走多远还没遇到横杠就放弃,像素。
+        ///
+        /// 这个上限是**防"顺着曲线走"**用的,所以它不能是个固定的像素数:合成夹具
+        /// 是 640 高的,而真实扫描件常是 3000 高 —— 那里的误差棒 200–300px 很常见,
+        /// 写死 90 会把它们全部判成"没有"。实际用的是它和 `maxStemFraction × 图高`
+        /// 里**较大**的那个(见 `stemLimit(for:)`)。
         public var maxStemLength: Double = 90
+        /// 误差棒长度的上限,按图高的比例 —— 真实图里棒不会长过这个数。
+        /// 0.15 是保守的:同一条曲线要走到这么远还遇不到横杠,那多半不是一根棒。
+        public var maxStemFraction: Double = 0.15
         /// 走棒时横向允许的晃动:笔画不是完美竖直的,中心每行会漂一两像素。
         public var stemWander: Int = 2
         /// 末端横杠至少要比棒身宽多少像素才算"横杠"。太小的阈值会把笔画
@@ -93,10 +100,11 @@ public enum ErrorBarScanner {
                 offsets.append(nil)
                 continue
             }
+            let limit = stemLimit(for: mask, parameters: parameters)
             let up = distance(toCapFrom: (x, y), direction: -1, mask: mask,
-                              parameters: parameters)
+                              parameters: parameters, limit: limit)
             let down = distance(toCapFrom: (x, y), direction: +1, mask: mask,
-                                parameters: parameters)
+                                parameters: parameters, limit: limit)
             if up == nil && down == nil {
                 offsets.append(nil)
             } else {
@@ -119,15 +127,23 @@ public enum ErrorBarScanner {
     ///    就是笔画的中点,它能被窗口看到,行走会穿过它停在它外面。
     /// 3. 从末端往里找,超过 `capSearchDepth` 就不算 —— 半路上的一次加粗
     ///    (曲线拐弯、刻度线)不叫帽子。
+    /// 走多远算走远了:固定的像素下限与"图高的一个比例"取较大者。
+    private static func stemLimit(for mask: ForegroundMask,
+                                  parameters: Parameters) -> Double {
+        Swift.max(parameters.maxStemLength,
+                  Double(mask.height) * parameters.maxStemFraction)
+    }
+
     private static func distance(toCapFrom origin: (x: Int, y: Int),
                                  direction: Int,
                                  mask: ForegroundMask,
-                                 parameters: Parameters) -> Double? {
+                                 parameters: Parameters,
+                                 limit: Double) -> Double? {
         var centre = origin.x
         var walked: [(row: Int, width: Int)] = []
         var step = 0
 
-        while Double(step) < parameters.maxStemLength {
+        while Double(step) < limit {
             step += 1
             let row = origin.y + direction * step
             guard row >= 0, row < mask.height else { break }

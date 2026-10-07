@@ -98,4 +98,22 @@ final class ErrorBarScannerTests: XCTestCase {
             XCTAssertEqual(offset.up, expected, accuracy: 1.5, "第 \(i) 个错位了")
         }
     }
+
+    /// 大图上的长棒也要找到:上限跟着图高走,不是一个写死的像素数。
+    ///
+    /// 复核时抓到的隐患:上限原本写死 90px —— 那是按 640 高的合成夹具定的,而
+    /// 真实扫描件常是 3000 高,那里 150–300px 的误差棒比比皆是,写死会让它们
+    /// 全部判成"没有",而且没有任何提示。
+    func testFindsLongBarsInATallImage() {
+        let chart = SyntheticChart.renderErrorBars(size: (width: 900, height: 1200),
+                                                   count: 4,
+                                                   up: { _ in 150 }, down: { _ in 120 })
+        let result = ErrorBarScanner.scan(points: chart.points, mask: mask(of: chart))
+        XCTAssertEqual(result.found, 4, "1200 高的图上,150px 的棒被判成了没有")
+        for (i, offset) in result.offsets.enumerated() {
+            guard let offset else { continue }
+            XCTAssertEqual(offset.up, 150, accuracy: 2.0, "第 \(i) 个上误差")
+            XCTAssertEqual(offset.down, 120, accuracy: 2.0, "第 \(i) 个下误差")
+        }
+    }
 }

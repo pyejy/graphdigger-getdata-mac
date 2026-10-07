@@ -10,7 +10,7 @@
 
 - 通用二进制:**arm64 + x86_64**,Intel 与 Apple 芯片都能跑
 - 体积:`.app` **5.4 MB**(含 1.5 MB 图标),`.dmg` **3.3 MB**
-- 单测:**231/231 通过**;内置自检:**129/129 通过**(含 PNG 真实解码路径、刻度与方向校验)
+- 单测:**234/234 通过**;内置自检:**129/129 通过**(含 PNG 真实解码路径、刻度与方向校验)
 - **整个工程可以存成一个文件**(`.gdproj`):图片、标定坐标系(可以多套)、曲线与点位都在里面,发给别人,对方装了本应用双击就能看到完整工程
 - **去除图上网格线**(操作 ▸ 去除图上网格线):扫描件/打印件的网格常被当成曲线取走;按几何特征(长、直、细、**等距成族**)从取点用的遮膜里去掉,同色网格也认得出
 - **浅色 / 深色两种外观都支持**:全部界面颜色在绘制时按当前外观解析,设计规范见 `../美学设计.md`
@@ -416,7 +416,7 @@ TSV 与 TXT 不受影响(制表符和空格不是小数点),剪贴板跟着一�
 ./scripts/build_universal.sh --debug    # debug 配置
 ./scripts/build_universal.sh --min-os 11.0   # 更宽的系统兼容(见下)
 
-swift test                              # 231 个单元测试
+swift test                              # 234 个单元测试
 dist/GraphDigger.app/Contents/MacOS/GraphDigger --selftest   # 端到端自检
 ```
 
@@ -468,7 +468,7 @@ GraphDigger/
 │       ├── CalibrationSheet.swift#   四点标定数值输入面板
 │       ├── SampleChartWriter.swift#  BitmapBuffer → PNG
 │       └── SelfTest.swift        #   端到端自检
-├── Tests/GDCoreTests/            # 231 个单元测试
+├── Tests/GDCoreTests/            # 234 个单元测试
 ├── scripts/build_universal.sh
 ├── samples/                      # 示例图
 ├── dist/                         # 构建产物(.app / .dmg)
