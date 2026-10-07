@@ -288,6 +288,36 @@ final class CanvasView: NSView {
         let color: RGB8
         let background: RGB8?
         let tolerance: Double
+        /// 第四道闸门是否开着(B-1)。算进签名,所以切换它会让所有遮膜失效重建 ——
+        /// 这正是想要的:网格在不在,是遮膜本身的性质。
+        let removesGridLines: Bool
+    }
+
+    /// 每条曲线最近一次网格去除的结果。状态行与自检读它 —— 一次误判要是无声的,
+    /// 用户只会看到"少了几段点";报了数,误判就变成看得见的事。
+    private var gridOutcomes: [UUID: GridLineRemover.Outcome] = [:]
+
+    /// 当前曲线的网格去除结果,没有就是 nil。
+    var activeGridOutcome: GridLineRemover.Outcome? {
+        guard let id = state.activeLineID else { return nil }
+        return gridOutcomes[id]
+    }
+
+    /// 构建一条曲线的遮膜:三道闸门,加上可选的第四道(网格线去除,B-1)。
+    ///
+    /// 一处实现,三个调用点(`refreshMasks` / `rebuildMask` / 取色)共用 ——
+    /// 三道闸门加第四道要是各写各的,迟早有一条路径忘了那道闸门,而症状是
+    /// "换个方式取色结果就不一样"。
+    private func buildMask(from buffer: BitmapBuffer, color: RGB8,
+                           background: RGB8?, tolerance: Double)
+        -> (mask: ForegroundMask, grid: GridLineRemover.Outcome) {
+        let raw = ForegroundMask.build(from: buffer, lineColor: color,
+                                       tolerance: tolerance, backgroundColor: background)
+        guard state.removesGridLines else {
+            return (mask: raw, grid: GridLineRemover.Outcome())
+        }
+        let cleaned = GridLineRemover.remove(from: raw)
+        return (mask: cleaned.mask, grid: cleaned.outcome)
     }
 
     /// The mask the next digitising action will use, or nil when the active
@@ -442,22 +472,40 @@ final class CanvasView: NSView {
         }
         var fresh: [UUID: ForegroundMask] = [:]
         var inputs: [UUID: MaskInput] = [:]
+        var outcomes: [UUID: GridLineRemover.Outcome] = [:]
         for line in state.lines {
             guard let color = line.lineColor else { continue }
             let input = MaskInput(color: color, background: line.backgroundColor,
-                                  tolerance: line.colorTolerance)
+                                  tolerance: line.colorTolerance,
+                                  removesGridLines: state.removesGridLines)
             inputs[line.id] = input
             if maskInputs[line.id] == input, let cached = masks[line.id] {
                 fresh[line.id] = cached
+                outcomes[line.id] = gridOutcomes[line.id]
             } else {
-                fresh[line.id] = ForegroundMask.build(from: buffer,
-                                                      lineColor: color,
-                                                      tolerance: line.colorTolerance,
-                                                      backgroundColor: line.backgroundColor)
+                let built = buildMask(from: buffer, color: color,
+                                      background: line.backgroundColor,
+                                      tolerance: line.colorTolerance)
+                fresh[line.id] = built.mask
+                outcomes[line.id] = built.grid
             }
         }
         masks = fresh
         maskInputs = inputs
+        gridOutcomes = outcomes
+    }
+
+    /// 打开/关闭「去除图上网格线」(B-1)。
+    ///
+    /// 进撤销历史,与颜色容差同一类:它改的是"取到哪些点"的前处理,不是视图状态。
+    /// 切换后所有遮膜按新签名重建 —— 已经取好的点不动(它们是数据,不是前处理),
+    /// 再取点时新遮膜才生效。
+    func setGridRemoval(_ on: Bool) {
+        perform("去除图上网格线") { $0.gridRemoval = on }
+        refreshMasks()
+        refreshSymbolCandidates()
+        needsDisplay = true
+        delegate?.canvasDidChangeState(self)
     }
 
     /// Pixels collected so far while in `.setScale`. Cleared by the delegate
@@ -1265,14 +1313,17 @@ final class CanvasView: NSView {
               let lineColor = line.lineColor else {
             masks[id] = nil
             maskInputs[id] = nil
+            gridOutcomes[id] = nil
             return
         }
-        masks[id] = ForegroundMask.build(from: buffer,
-                                         lineColor: lineColor,
-                                         tolerance: line.colorTolerance,
-                                         backgroundColor: line.backgroundColor)
+        let built = buildMask(from: buffer, color: lineColor,
+                              background: line.backgroundColor,
+                              tolerance: line.colorTolerance)
+        masks[id] = built.mask
+        gridOutcomes[id] = built.grid
         maskInputs[id] = MaskInput(color: lineColor, background: line.backgroundColor,
-                                   tolerance: line.colorTolerance)
+                                   tolerance: line.colorTolerance,
+                                   removesGridLines: state.removesGridLines)
         // A new mask means a new set of symbols: a preview computed from the old
         // colour would go on ringing glyphs that no longer match it.
         refreshSymbolCandidates()

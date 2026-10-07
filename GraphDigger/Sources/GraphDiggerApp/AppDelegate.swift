@@ -98,6 +98,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var systemListMenu: NSMenu!
     private var assignToSystemMenu: NSMenu!
 
+    /// 「去除图上网格线」菜单项(B-1),`refreshUI` 负责它的勾与可用性。
+    private var gridRemovalItem: NSMenuItem!
+
     /// The data-space plot (FR-7.1), built the first time it is asked for.
     ///
     /// Held rather than rebuilt so the window keeps its position and size, and
@@ -523,6 +526,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         action: #selector(alignGridToAxisOrigin(_:)), keyEquivalent: "")
         opsMenu.addItem(withTitle: "网格偏移 (Grid Phase)…",
                         action: #selector(setGridPhase(_:)), keyEquivalent: "")
+
+        // ---- 去除图上网格线 (B-1) ------------------------------------------
+        //
+        // 与上面三项**不是一回事**,所以用一条分隔线隔开:「网格间距 / 方向 /
+        // 偏移」说的是区域取点扫过图的那套虚拟网格,而这一项处理的是**图上画着的**
+        // 网格线 —— 扫描件与打印图最常见的干扰源,Engauge 的教程把"没先去网格"
+        // 列为"整个画面被选中"的第一大原因。名字里写明「图上」就是为了这条分界。
+        opsMenu.addItem(.separator())
+        let removeGrid = NSMenuItem(title: "去除图上网格线 (Remove Grid Lines on Image)",
+                                    action: #selector(toggleGridRemoval(_:)),
+                                    keyEquivalent: "")
+        removeGrid.toolTip = "按几何特征(长、直、细、等距)把图上画着的网格线从取点用的遮膜里去掉了。"
+            + "同色网格也认得出;但曲线自己就是一条等距的细直线时无法区分,那种图请用区域掩膜。"
+        opsMenu.addItem(removeGrid)
+        gridRemovalItem = removeGrid
 
         // ---- Coordinate systems (FR-13) ----------------------------------
         //
@@ -1102,6 +1120,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refreshUI("已删除坐标系 \(ordinal)")
     }
 
+    @objc private func toggleGridRemoval(_ sender: Any?) {
+        guard canvas.buffer != nil else {
+            presentError("先打开一张图表图片,再去网格线。")
+            return
+        }
+        let turningOn = !canvas.state.removesGridLines
+        canvas.setGridRemoval(turningOn)
+        guard turningOn else {
+            refreshUI("已关闭网格线去除 —— 遮膜回到原样")
+            return
+        }
+        // 报数,不报状态:一次误判要是无声的,用户只会看到"少了几段点"。
+        // 数报了,误判就是看得见的事。
+        if let outcome = canvas.activeGridOutcome, !outcome.isEmpty {
+            refreshUI("已去除网格线:\(outcome.columns.count) 条竖线 + \(outcome.rows.count) 条横线"
+                + "(共 \(outcome.removedPixels) 像素)—— 现在重新取点生效")
+        } else {
+            refreshUI("已打开网格线去除 —— 这张图上没找到等距网格线"
+                + "(曲线还没取色时先「取色」,或者它本来就没有网格)")
+        }
+    }
+
     @objc private func chooseCoordinateSystem(_ sender: NSMenuItem) {
         guard let id = systemID(from: sender) else { return }
         canvas.selectCoordinateSystem(id: id)
@@ -1520,6 +1560,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if state.systems.count > 1, let ordinal = state.activeSystemIndex.map({ $0 + 1 }) {
             status.append("坐标系 \(ordinal)/\(state.systems.count)")
         }
+        // 这道闸门开着时要说出来:遮膜与"没有这一项时"不一样,而屏幕上没有别的
+        // 地方能回答"为什么这条曲线少了那些点"。
+        if state.removesGridLines { status.append("网格线已去除") }
         if hasImage {
             if let active, active.lineColor == nil {
                 status.append("⚠️「\(active.name)」未取色")
@@ -1601,6 +1644,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The coordinate-system lists, last because they read the very state the
         // blocks above have just finished describing.
         reloadCoordinateSystemMenus()
+
+        // 去网格线的勾与可用性:没有图就没有遮膜,这一项也就无从谈起。
+        gridRemovalItem.state = state.removesGridLines ? .on : .off
+        gridRemovalItem.isEnabled = hasImage
 
         // Last, and deliberately: the title and the edited dot are read off the
         // state this method has just finished rebuilding the other views from, so

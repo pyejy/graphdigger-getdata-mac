@@ -26,6 +26,13 @@ public enum SyntheticChart {
         public var yMinValue: Double
         public var yMaxValue: Double
         public var isLogY: Bool
+        /// Ground truth for the ruling grid, when the fixture drew one: the
+        /// columns and rows the grid's strokes run along. Empty for a chart
+        /// without a grid — and it is captured here rather than recomputed by
+        /// the test, so a test cannot pass by repeating the generator's own
+        /// arithmetic.
+        public var gridColumns: [Int] = []
+        public var gridRows: [Int] = []
 
         /// Calibration implied by the frame the generator drew — what a user
         /// would enter by clicking the four corners.
@@ -185,7 +192,11 @@ public enum SyntheticChart {
     public static func render(size: (width: Int, height: Int) = (900, 640),
                               function: (Double) -> Double = { 0.5 + 4.0 / (1.0 + exp(-($0 - 5.0))) },
                               isLogY: Bool = false,
-                              lineWidth: Int = 3) -> Chart {
+                              lineWidth: Int = 3,
+                              gridColumns: Int = 0,
+                              gridRows: Int = 0,
+                              gridColor: RGB8? = nil,
+                              gridLineWidth: Int = 1) -> Chart {
         let w = size.width, h = size.height
         var pixels = [UInt8](repeating: 0, count: w * h * 3)
         for i in 0..<(w * h) {
@@ -223,6 +234,36 @@ public enum SyntheticChart {
         for x in axX0...axX1 { setPixel(x, axY0, ink) }
         for y in axY1...axY0 { setPixel(axX0, y, ink) }
 
+        // The ruling grid, when asked for: equal-spaced thin lines inside the
+        // plot area, drawn *under* the curve the way a printed figure has them.
+        // The colour defaults to the curve's own, because that is the case that
+        // matters — a grid in a distinct colour is already excluded by the
+        // distance and hue gates, and would let the geometric pass look better
+        // than it is.
+        var gridColumnCentres: [Int] = []
+        var gridRowCentres: [Int] = []
+        if gridColumns > 0 || gridRows > 0 {
+            let c = gridColor ?? curveColor
+            if gridColumns > 0 {
+                for k in 1...gridColumns {
+                    let x = axX0 + (axX1 - axX0) * k / (gridColumns + 1)
+                    gridColumnCentres.append(x)
+                    for y in axY1...axY0 {
+                        for d in 0..<max(1, gridLineWidth) { setPixel(x + d, y, c) }
+                    }
+                }
+            }
+            if gridRows > 0 {
+                for k in 1...gridRows {
+                    let y = axY1 + (axY0 - axY1) * k / (gridRows + 1)
+                    gridRowCentres.append(y)
+                    for x in axX0...axX1 {
+                        for d in 0..<max(1, gridLineWidth) { setPixel(x, y + d, c) }
+                    }
+                }
+            }
+        }
+
         let samples = 2000
         var curvePixels: [PixelPoint] = []
         curvePixels.reserveCapacity(samples + 1)
@@ -242,7 +283,9 @@ public enum SyntheticChart {
                      axisY0: axY0, axisY1: axY1,
                      xMinValue: xMinV, xMaxValue: xMaxV,
                      yMinValue: yMinV, yMaxValue: yMaxV,
-                     isLogY: isLogY)
+                     isLogY: isLogY,
+                     gridColumns: gridColumnCentres,
+                     gridRows: gridRowCentres)
     }
 
     /// The symbol shapes a synthetic scatter can draw.

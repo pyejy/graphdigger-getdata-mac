@@ -1128,6 +1128,9 @@ enum SelfTest {
         check("曲线列表与点表不横向溢出(点数列不需要横向滚动才看得到)",
               listFit.passed, listFit.detail)
 
+        let gridRemoval = gridRemovalCleansTheMask()
+        check("去网格线开关真的换了一张遮膜,且来回切都能复原", gridRemoval.passed, gridRemoval.detail)
+
         print(String(repeating: "─", count: 62))
         if failures == 0 {
             print("全部通过。")
@@ -4819,6 +4822,64 @@ enum SelfTest {
             if frame > clip + 0.5 { ok = false }
         }
         return (ok, parts.joined(separator: "; "))
+    }
+
+    /// B-1 网格线去除的端到端接线:真画布、真遮膜、真开关。
+    ///
+    /// 算法本身在 `GridLineRemoverTests` 里按像素验过;这里验的是**接线** ——
+    /// 工程里的开关有没有真的换掉遮膜(而不是只改了一个布尔),关掉之后能不能
+    /// 复原,以及去除结果有没有被记下来给状态行报数。这三样错了,单测全绿也
+    /// 看不出来:用户只会发现"勾了没反应"或"取消勾选回不来"。
+    private static func gridRemovalCleansTheMask() -> (passed: Bool, detail: String) {
+        let delegate = AppDelegate()
+        delegate.buildMenu()
+        delegate.buildWindow()
+        guard let canvas = delegate.canvas else { return (false, "画布没建出来") }
+
+        let chart = SyntheticChart.render(gridColumns: 10, gridRows: 10, gridLineWidth: 1)
+        guard let cg = SampleChartWriter.makeCGImage(from: chart.buffer),
+              let png = NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:])
+        else { return (false, "造不出测试图") }
+
+        var state = ProjectState()
+        let lineID = state.addLine(name: "带网格", color: chart.lineColor)
+        state.setLineColor(chart.lineColor, for: lineID)
+        state.gridRemoval = true
+        let document = ProjectDocument(
+            header: ProjectHeader(image: ProjectImageInfo(fileName: "grid.png",
+                                                          pixelWidth: chart.buffer.width,
+                                                          pixelHeight: chart.buffer.height),
+                                  state: state),
+            imageData: png)
+        guard canvas.load(project: document) else { return (false, "项目载不进画布") }
+
+        /// 网格线所在的行列上,遮膜里还有多少墨。
+        func inkOnGrid(_ mask: ForegroundMask?) -> Int {
+            guard let mask else { return -1 }
+            var count = 0
+            for column in chart.gridColumns where column < mask.width {
+                for y in 0..<mask.height where mask.isForeground(x: column, y: y) { count += 1 }
+            }
+            for row in chart.gridRows where row < mask.height {
+                for x in 0..<mask.width where mask.isForeground(x: x, y: row) { count += 1 }
+            }
+            return count
+        }
+
+        let cleaned = inkOnGrid(canvas.activeMask)
+        let outcome = canvas.activeGridOutcome
+
+        canvas.setGridRemoval(false)
+        let restored = inkOnGrid(canvas.activeMask)
+        canvas.setGridRemoval(true)
+        let cleanedAgain = inkOnGrid(canvas.activeMask)
+
+        let passed = cleaned == 0 && restored > 1_000 && cleanedAgain == 0
+            && (outcome?.columns.count ?? 0) == 10 && (outcome?.rows.count ?? 0) == 10
+        return (passed, passed
+            ? "开:网格墨 0 像素(报出 10 竖 + 10 横)· 关:复原 \(restored) 像素 · 再开:又是 0"
+            : "开=\(cleaned) 关=\(restored) 再开=\(cleanedAgain)"
+                + " 报告列=\(outcome?.columns.count ?? -1) 行=\(outcome?.rows.count ?? -1)")
     }
 
     /// "Excel-style", as the user put it: every row separated by a rule and every

@@ -248,6 +248,16 @@ public struct ProjectState: Equatable, Codable, Sendable {
     /// deleting the active system cannot leave the app pointing at nothing.
     public var activeCoordinateSystemID: UUID?
 
+    /// 建遮膜时是否去掉图上的网格线 —— B-1。
+    ///
+    /// Optional, like every field added after the format shipped (`ProjectFile`
+    /// 的规矩)。读的时候走 `removesGridLines`。
+    ///
+    /// 属于**工程**而不是视图状态:它改变的是"这条曲线取到哪些点"的前处理,
+    /// 同一张图重开时要一模一样,所以它随 `.gdproj` 存、进撤销历史
+    /// (与颜色容差同一类)。
+    public var gridRemoval: Bool?
+
     public var lines: [CurveLine]
     public var activeLineID: UUID?
 
@@ -314,6 +324,10 @@ public struct ProjectState: Equatable, Codable, Sendable {
     /// the only thing that stops them drifting.
     public var symbolDiameter: Int { markerDiameter ?? 11 }
 
+    /// 建遮膜时是否去掉图上的网格线。缺省关 —— 它是有代价的一步(见
+    /// `GridLineRemover`),而且只在真有网格的图上才有意义。
+    public var removesGridLines: Bool { gridRemoval ?? false }
+
     public init(calibration: CalibrationMap? = nil,
                 lines: [CurveLine] = [],
                 activeLineID: UUID? = nil,
@@ -370,7 +384,7 @@ public struct ProjectState: Equatable, Codable, Sendable {
         case coordinateSystems, activeCoordinateSystemID
         case lines, activeLineID
         case defaultBackgroundColor, defaultColorTolerance, gridSpacing
-        case gridAxis, gridOffset, traceSpacing, markerDiameter
+        case gridAxis, gridOffset, traceSpacing, markerDiameter, gridRemoval
     }
 
     /// The names a **format-v1** file uses: one mapping for the whole project.
@@ -400,6 +414,7 @@ public struct ProjectState: Equatable, Codable, Sendable {
         gridOffset = try container.decodeIfPresent(Int.self, forKey: .gridOffset)
         traceSpacing = try container.decodeIfPresent(Int.self, forKey: .traceSpacing) ?? 1
         markerDiameter = try container.decodeIfPresent(Int.self, forKey: .markerDiameter)
+        gridRemoval = try container.decodeIfPresent(Bool.self, forKey: .gridRemoval)
 
         let systems = try container.decodeIfPresent([CoordinateSystem].self,
                                                     forKey: .coordinateSystems)
