@@ -52,10 +52,29 @@ public enum XLSXWriter {
         var sheets: [(name: String, rows: [[String]])] = []
         for line in populated {
             guard let map = mapFor(line) else { throw ExportError.calibrationMissing }
-            var rows: [[String]] = [["x", "y"]]
-            for point in line.orderedPoints {
+            // 有误差棒就多两列(B-2)。上下分开,不合并成一个 ±值。
+            let carriesErrors = line.hasErrorBars
+            let bars = line.orderedErrorBars
+            var rows: [[String]] = [carriesErrors ? ["x", "y", "yErrLow", "yErrHigh"]
+                                                  : ["x", "y"]]
+            for (index, point) in line.orderedPoints.enumerated() {
                 let value = try map.data(fromPixel: point)
-                rows.append([Exporter.decimal(value.x), Exporter.decimal(value.y)])
+                var row = [Exporter.decimal(value.x), Exporter.decimal(value.y)]
+                if carriesErrors {
+                    if let bar = bars[index] {
+                        let above = try map.data(fromPixel:
+                            PixelPoint(x: point.x, y: point.y - bar.up)).y
+                        let below = try map.data(fromPixel:
+                            PixelPoint(x: point.x, y: point.y + bar.down)).y
+                        // 单元格留空(而不是 0)表示这个点没有棒 —— 0 是一个测量结果。
+                        row.append(Exporter.decimal(abs(value.y - below)))
+                        row.append(Exporter.decimal(abs(above - value.y)))
+                    } else {
+                        row.append("")
+                        row.append("")
+                    }
+                }
+                rows.append(row)
             }
             sheets.append((line.name, rows))
         }

@@ -14,8 +14,43 @@ public struct CurveLine: Identifiable, Equatable, Codable, Sendable {
     /// image but can be changed, which matters when a chart uses several similar
     /// colours and the point layers would otherwise be hard to tell apart.
     public var color: RGB8
+    /// 每个点的误差棒(B-2),与 `points` 一一对应、同序。
+    ///
+    /// 与 `points` 一样是**存储序**:显示序要经 `orderedPointIndices` 换算,
+    /// 与点本身同一套规矩。`nil` 的条目表示那个点没有找到误差棒。
+    ///
+    /// **不变量:数组长度必须等于 `points.count`** —— 长度对不上时整组作废
+    /// (`didSet` 里自动清空)。误差值是按位置对齐的,一旦点被插入或删除而数组
+    /// 没跟上,每一个误差都会被安到错误的点上,而那是最坏的一种错:数字看着
+    /// 正常,安错了对象。宁可丢掉重扫,不可错位。
+    public var errorBars: [ErrorBarOffset?]? {
+        didSet {
+            if let bars = errorBars, bars.count != points.count { errorBars = nil }
+        }
+    }
+
+    /// 有没有任何一根误差棒 —— 导出要不要多两列、界面要不要画,都看它。
+    public var hasErrorBars: Bool {
+        errorBars?.contains(where: { $0 != nil }) ?? false
+    }
+
+    /// 显示序下的误差棒,与 `orderedPoints` 对齐。
+    public var orderedErrorBars: [ErrorBarOffset?] {
+        guard let errorBars, errorBars.count == points.count else {
+            return Array(repeating: nil, count: points.count)
+        }
+        return orderedPointIndices.map { errorBars[$0] }
+    }
+
     /// Points in the order they were taken — the raw record.
-    public var points: [PixelPoint]
+    ///
+    /// 点一变(插入、删除、重新取点),按位置对齐的误差棒就整组作废 —— 见
+    /// `errorBars` 的不变量。
+    public var points: [PixelPoint] {
+        didSet {
+            if let bars = errorBars, bars.count != points.count { errorBars = nil }
+        }
+    }
     public var isVisible: Bool
 
     /// The curve colour sampled from the image for *this* line. Each curve has

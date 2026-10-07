@@ -275,13 +275,51 @@ public enum Exporter {
             try line.orderedPoints.map { try value($0, mapFor(line)) }
         }
 
+        /// 每个点的上下误差,换算成与 y 同一套坐标的数值;没找到棒的点为 nil。
+        ///
+        /// 误差记的是**像素**偏移(B-2),所以在这里按曲线自己的映射换算 ——
+        /// 同一批点换一套标定(一图多套坐标系),误差跟着一起换算,不会留下一组
+        /// 按旧标定写死的数。上下分开算:不对称误差(+σ/−2σ)不是要抹平的噪声,
+        /// 是信息。
+        func errorRows(_ line: CurveLine) throws -> [(low: Double, high: Double)?] {
+            guard line.hasErrorBars else {
+                return Array(repeating: nil, count: line.points.count)
+            }
+            let map = mapFor(line)
+            let bars = line.orderedErrorBars
+            return try line.orderedPoints.enumerated().map { index, point in
+                guard let bar = bars[index] else { return nil }
+                let centre = try value(point, map).y
+                let above = try value(PixelPoint(x: point.x, y: point.y - bar.up), map).y
+                let below = try value(PixelPoint(x: point.x, y: point.y + bar.down), map).y
+                return (low: abs(centre - below), high: abs(above - centre))
+            }
+        }
+
         // One curve: a plain two-column table.
         if lines.count <= 1 {
             var out = ""
-            if includeHeader { out += "x\(separator)y\n" }
+            let carriesErrors = lines.contains { $0.hasErrorBars }
+            if includeHeader {
+                out += "x\(separator)y"
+                if carriesErrors { out += separator + "yErrLow" + separator + "yErrHigh" }
+                out += "\n"
+            }
             for line in lines {
-                for data in try rows(line) {
-                    out += number(data.x) + separator + number(data.y) + "\n"
+                let errors = try errorRows(line)
+                for (index, data) in try rows(line).enumerated() {
+                    out += number(data.x) + separator + number(data.y)
+                    if carriesErrors {
+                        if let error = errors[index] {
+                            out += separator + number(error.low)
+                                + separator + number(error.high)
+                        } else {
+                            // 这个点没有棒:留空,不写 0 —— 0 是一个测量结果,
+                            // 空是"没有"。
+                            out += separator + separator
+                        }
+                    }
+                    out += "\n"
                 }
             }
             return out
@@ -306,8 +344,15 @@ public enum Exporter {
             var out = ""
             for (index, line) in lines.enumerated() {
                 if includeHeader { out += "# \(line.name)\n" }
-                for data in try rows(line) {
-                    out += number(data.x) + separator + number(data.y) + "\n"
+                let errors = try errorRows(line)
+                for (position, data) in try rows(line).enumerated() {
+                    out += number(data.x) + separator + number(data.y)
+                    if line.hasErrorBars, let error = errors[position] {
+                        out += separator + number(error.low) + separator + number(error.high)
+                    } else if line.hasErrorBars {
+                        out += separator + separator
+                    }
+                    out += "\n"
                 }
                 if index < lines.count - 1 { out += "\n" }
             }
@@ -315,22 +360,39 @@ public enum Exporter {
         }
 
         let columns = try lines.map { try rows($0) }
+        let errorColumns = try lines.map { try errorRows($0) }
+        let carriesErrors = lines.map(\.hasErrorBars)
         var out = ""
         if includeHeader {
-            out += (1...lines.count).flatMap { ["x\($0)", "y\($0)"] }
-                .joined(separator: separator) + "\n"
+            out += (1...lines.count).flatMap { index -> [String] in
+                carriesErrors[index - 1]
+                    ? ["x\(index)", "y\(index)", "yErrLow\(index)", "yErrHigh\(index)"]
+                    : ["x\(index)", "y\(index)"]
+            }.joined(separator: separator) + "\n"
         }
         for row in 0..<(columns.map(\.count).max() ?? 0) {
             var cells: [String] = []
-            for column in columns {
+            for (index, column) in columns.enumerated() {
+                let withErrors = carriesErrors[index]
                 if row < column.count {
                     cells.append(number(column[row].x))
                     cells.append(number(column[row].y))
+                    if withErrors, let error = errorColumns[index][row] {
+                        cells.append(number(error.low))
+                        cells.append(number(error.high))
+                    } else if withErrors {
+                        cells.append("")
+                        cells.append("")
+                    }
                 } else {
                     // Stayed empty on purpose: a hole in the middle of a row would
                     // shift every later column left and pair the wrong values.
                     cells.append("")
                     cells.append("")
+                    if withErrors {
+                        cells.append("")
+                        cells.append("")
+                    }
                 }
             }
             out += cells.joined(separator: separator) + "\n"
