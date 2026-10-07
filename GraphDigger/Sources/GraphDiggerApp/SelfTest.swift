@@ -3978,7 +3978,7 @@ enum SelfTest {
             ("⌘M", "Match Symbols (符号匹配)"),
             ("⇧⌘E", "Edit Point (点编辑)"),
             ("⌘D", "Digitize Area (区域取点)"),
-            ("⌘0", "Browse (浏览)"),
+            ("⌘1", "Browse Tool (浏览:缩放平移)"),
         ]
         for entry in expected {
             let owner = owners[entry.shortcut]?.first

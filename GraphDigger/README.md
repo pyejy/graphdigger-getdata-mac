@@ -242,7 +242,7 @@ dist/GraphDigger.app/Contents/MacOS/GraphDigger --make-sample samples/sample.png
 | 重新选点 | 重选 | Operations ▸ Re-digitize | `⌘R` |
 | **点编辑**(拖动/插入/⌫ 删除) | — | Operations ▸ Edit Point | `⇧⌘E` |
 | 清除标定并重来 | — | Operations ▸ Recalibrate | `⌥⌘R` |
-| 缩放平移 | 浏览 | Operations ▸ Browse | `⌘0` |
+| 缩放平移 | 浏览 | Operations ▸ Browse Tool | `⌘1` |
 | 复制数据(全部曲线) | 复制 | File ▸ Copy Data to Clipboard | `⌘C` |
 | **只复制当前曲线** | — | File ▸ Copy Current Curve | `⌥⌘C` |
 | 导出 | 导出… | File ▸ Export Data | — |

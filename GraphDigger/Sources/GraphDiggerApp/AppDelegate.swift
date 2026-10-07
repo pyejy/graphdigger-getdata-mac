@@ -247,6 +247,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                           styleMask: [.titled, .closable, .miniaturizable, .resizable],
                           backing: .buffered, defer: false)
         window.title = "GraphDigger"
+        // The modern header: the titlebar takes the window background (no drawn
+        // bar, no separator) and spells nothing, so the titlebar and the button
+        // row below it read as one continuous strip of chrome. The title still
+        // exists — Mission Control, the Dock menu and screenshots of the window
+        // all read it — it is just not painted over the toolbar's territory.
+        //
+        // The full treatment (`fullSizeContentView`, buttons floating over the
+        // toolbar itself) was weighed and rejected: the traffic lights occupy
+        // the first ~78pt of the row, and the row's width budget is 1168pt with
+        // ~13pt of slack on the narrowest supported screen — there is no room
+        // to buy that margin back without deleting buttons. `toolbarStyle`
+        // has no visible effect without an NSToolbar; set for the day one
+        // exists, harmless now.
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.toolbarStyle = .unified
         window.center()
         window.minSize = NSSize(width: minWidth, height: 620)
         // So closing the window asks about unsaved work *before* the window goes,
@@ -404,7 +420,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             opsMenu.addItem(item)
         }
 
-        addTool("Browse (浏览)", "browse", "0")
+        // 「浏览」两个字读起来像"浏览文件"——用户点了等一个文件选择窗,而它其实
+        // 是切换到缩放平移工具。把真实行为写进菜单项的名字里。
+        addTool("Browse Tool (浏览:缩放平移)", "browse", "1")
         opsMenu.addItem(.separator())
         // The plain letter goes to the everyday action; the rarer or more
         // destructive one keeps its letter a modifier over. That is the rule
@@ -1181,22 +1199,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func applyTool(_ raw: String) {
+        // 纯工具切换:状态行报告一次「现在是什么工具」。尤其当点的就是当前
+        // 已经活跃的那个工具时,没有这句话,菜单点击看起来就是毫无反应。
+        func arm(_ tool: ToolMode) {
+            canvas.tool = tool
+            refreshUI("工具 = \(tool.hint)")
+        }
         switch raw {
         case "recalibrate":         recalibrate()
         case "tolerance":           setTolerance(nil)
         case "setScale":            beginCalibration()
         case "editCalibration":     editCalibrationValues()
-        case "pickLineColor":       canvas.tool = .pickLineColor
-        case "pickBackgroundColor": canvas.tool = .pickBackgroundColor
-        case "gridDigitize":        canvas.tool = .gridDigitize
-        case "symbolMatch":         canvas.tool = .symbolMatch
-        case "traceDigitize":       canvas.tool = .traceDigitize
-        case "capture":             canvas.tool = .capture
-        case "eraser":              canvas.tool = .eraser
-        case "editPoint":           canvas.tool = .editPoint
-        case "redigitize":          canvas.tool = .redigitize
-        case "reorder":             canvas.tool = .reorder
-        default:                    canvas.tool = .browse
+        case "pickLineColor":       arm(.pickLineColor); return
+        case "pickBackgroundColor": arm(.pickBackgroundColor); return
+        case "gridDigitize":        arm(.gridDigitize); return
+        case "symbolMatch":         arm(.symbolMatch); return
+        case "traceDigitize":       arm(.traceDigitize); return
+        case "capture":             arm(.capture); return
+        case "eraser":              arm(.eraser); return
+        case "editPoint":           arm(.editPoint); return
+        case "redigitize":          arm(.redigitize); return
+        case "reorder":             arm(.reorder); return
+        default:                    arm(.browse); return
         }
         refreshUI()
     }

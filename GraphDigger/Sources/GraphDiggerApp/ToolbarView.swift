@@ -54,9 +54,12 @@ final class ToolbarView: NSView {
     /// pair, at the far left, sits outside these three: it acts on whatever the
     /// last action was, not on the tool in hand.)
     ///
-    /// Shortcuts stop at 9 because the menu bar uses ⌘0–⌘9.
+    /// Shortcuts are letters (each tool's own initial where free); the one
+    /// digit, 浏览's ⌘1, replaced ⌘0 — a zero in a menu reads as the letter O,
+    /// and a user sat there pressing what looked like 「打开」. A real report,
+    /// not a hypothetical.
     private static let toolSpecs: [ToolButton] = [
-        ToolButton(tool: .browse, title: "浏览", symbol: "hand.raised", shortcut: "⌘0"),
+        ToolButton(tool: .browse, title: "浏览", symbol: "hand.raised", shortcut: "⌘1"),
         ToolButton(tool: .setScale, title: "标定", symbol: "ruler", shortcut: "⌘S"),
         ToolButton(tool: .pickLineColor, title: "取色", symbol: "eyedropper", shortcut: "⌘L"),
         ToolButton(tool: .gridDigitize, title: "区域取点", symbol: "rectangle.dashed", shortcut: "⌘D"),
