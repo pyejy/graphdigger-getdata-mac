@@ -288,6 +288,123 @@ public enum SyntheticChart {
                      gridRows: gridRowCentres)
     }
 
+    /// 带误差棒的合成图(B-2 的夹具):每个数据点一根竖棒,上下各一根横杠。
+    ///
+    /// 真值逐点给,而不是让测试自己按公式再算一遍 —— 那等于把生成器的算术抄进
+    /// 断言里,生成器错了测试跟着错。
+    public struct ErrorBarChart: Sendable {
+        public var buffer: BitmapBuffer
+        /// 数据点中心(像素),也是"已经取到的点"。
+        public var points: [PixelPoint]
+        /// 每个点向上的误差(像素),与 `points` 一一对应。
+        public var upPixels: [Double]
+        /// 每个点向下的误差(像素)。
+        public var downPixels: [Double]
+        public var lineColor: RGB8
+        public var backgroundColor: RGB8
+        public var axisX0: Int
+        public var axisX1: Int
+        public var axisY0: Int
+        public var axisY1: Int
+        public var xMinValue: Double
+        public var xMaxValue: Double
+        public var yMinValue: Double
+        public var yMaxValue: Double
+
+        public var calibration: CalibrationMap {
+            CalibrationMap(
+                x: AxisCalibration(pixelMin: Double(axisX0), valueMin: xMinValue,
+                                   pixelMax: Double(axisX1), valueMax: xMaxValue),
+                y: AxisCalibration(pixelMin: Double(axisY0), valueMin: yMinValue,
+                                   pixelMax: Double(axisY1), valueMax: yMaxValue))
+        }
+    }
+
+    /// 画一张带误差棒的散点图。
+    ///
+    /// - `up` / `down` 按点序号给出误差长度(像素),默认对称 —— 不对称是真实
+    ///   存在的情形,所以由调用方决定,不写死成对称。
+    /// - `withErrorBars: false` 画纯散点:同一个夹具就能兼作"不许误报"的对照,
+    ///   比再造一张图更严 —— 除了棒,两者逐像素相同。
+    public static func renderErrorBars(
+        size: (width: Int, height: Int) = (900, 640),
+        count: Int = 8,
+        up: (Int) -> Double = { _ in 26 },
+        down: (Int) -> Double = { _ in 26 },
+        withErrorBars: Bool = true,
+        capHalfWidth: Int = 5,
+        stemWidth: Int = 2,
+        markerDiameter: Int = 9) -> ErrorBarChart {
+        let w = size.width, h = size.height
+        var pixels = [UInt8](repeating: 0, count: w * h * 3)
+        for i in 0..<(w * h) {
+            pixels[i * 3] = background.r
+            pixels[i * 3 + 1] = background.g
+            pixels[i * 3 + 2] = background.b
+        }
+
+        let axX0 = 80, axX1 = w - 40
+        let axY0 = h - 60, axY1 = 40
+        let xMinV = 0.0, xMaxV = 10.0
+        let yMinV = 0.0, yMaxV = 5.0
+
+        @inline(__always)
+        func setPixel(_ x: Int, _ y: Int, _ c: RGB8) {
+            guard x >= 0, x < w, y >= 0, y < h else { return }
+            let i = (y * w + x) * 3
+            pixels[i] = c.r; pixels[i + 1] = c.g; pixels[i + 2] = c.b
+        }
+        @inline(__always)
+        func fillRect(_ x0: Int, _ x1: Int, _ y0: Int, _ y1: Int, _ c: RGB8) {
+            guard x1 >= x0, y1 >= y0 else { return }
+            for y in y0...y1 { for x in x0...x1 { setPixel(x, y, c) } }
+        }
+
+        for x in axX0...axX1 { setPixel(x, axY0, ink) }
+        for y in axY1...axY0 { setPixel(axX0, y, ink) }
+
+        // 点沿一条缓慢上行的曲线分布(实验图常见的样子)。
+        var points: [PixelPoint] = []
+        var ups: [Double] = []
+        var downs: [Double] = []
+        for i in 0..<count {
+            let t = Double(i) / Double(max(1, count - 1))
+            let px = Int((Double(axX0) + 40 + t * Double(axX1 - axX0 - 80)).rounded())
+            let value = 1.0 + 2.4 * t
+            let py = Int((Double(axY0) - (value - yMinV) / (yMaxV - yMinV)
+                                          * Double(axY0 - axY1)).rounded())
+            let upLen = up(i), downLen = down(i)
+            points.append(PixelPoint(x: Double(px), y: Double(py)))
+            ups.append(upLen)
+            downs.append(downLen)
+
+            if withErrorBars {
+                // 棒身:以点为中线的一段竖线(棒身宽度从点的中心向两侧铺开)。
+                let half = max(0, (stemWidth - 1) / 2)
+                let top = py - Int(upLen.rounded())
+                let bottom = py + Int(downLen.rounded())
+                fillRect(px - half, px + half, top, bottom, curveColor)
+                // 上下横杠。
+                fillRect(px - capHalfWidth, px + capHalfWidth, top, top + 1, curveColor)
+                fillRect(px - capHalfWidth, px + capHalfWidth, bottom - 1, bottom, curveColor)
+            }
+            // 标记画在最后:它盖住棒身中段,与真实图一致(点压在棒上)。
+            let r = markerDiameter / 2
+            for dy in -r...r {
+                for dx in -r...r where dx * dx + dy * dy <= r * r {
+                    setPixel(px + dx, py + dy, scatterColor)
+                }
+            }
+        }
+
+        return ErrorBarChart(buffer: BitmapBuffer(width: w, height: h, pixels: pixels),
+                             points: points, upPixels: ups, downPixels: downs,
+                             lineColor: scatterColor, backgroundColor: background,
+                             axisX0: axX0, axisX1: axX1, axisY0: axY0, axisY1: axY1,
+                             xMinValue: xMinV, xMaxValue: xMaxV,
+                             yMinValue: yMinV, yMaxValue: yMaxV)
+    }
+
     /// The symbol shapes a synthetic scatter can draw.
     ///
     /// More than one because a matcher that passes against circles alone has not
