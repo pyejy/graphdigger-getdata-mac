@@ -303,6 +303,79 @@ final class CanvasView: NSView {
         return gridOutcomes[id]
     }
 
+    /// 对当前曲线上已取的点扫一遍误差棒(B-2),把结果写回曲线。
+    ///
+    /// 用**曲线自己的遮膜**去找横杠 —— 误差棒与曲线通常同色,遮膜已经把"不是这个
+    /// 颜色的东西"挡在外面了(顺带还有去网格线那一道)。进撤销历史:它改的是数据,
+    /// 与取点同级。
+    @discardableResult
+    func scanErrorBars() -> ErrorBarScanner.Result? {
+        guard let id = state.activeLineID,
+              let line = state.lines.first(where: { $0.id == id }),
+              let mask = masks[id], !line.points.isEmpty else { return nil }
+        let result = ErrorBarScanner.scan(points: line.points, mask: mask)
+        perform("提取误差棒") { state in
+            guard let index = state.lines.firstIndex(where: { $0.id == id }) else { return }
+            state.lines[index].errorBars = result.offsets
+        }
+        needsDisplay = true
+        delegate?.canvasDidChangeState(self)
+        return result
+    }
+
+    /// 清掉当前曲线的误差棒。点不动 —— 只丢那两列。
+    func clearErrorBars() {
+        guard let id = state.activeLineID,
+              let line = state.lines.first(where: { $0.id == id }),
+              line.errorBars != nil else { return }
+        perform("清除误差棒") { state in
+            guard let index = state.lines.firstIndex(where: { $0.id == id }) else { return }
+            state.lines[index].errorBars = nil
+        }
+        needsDisplay = true
+        delegate?.canvasDidChangeState(self)
+    }
+
+    /// 画误差棒(B-2)。
+    ///
+    /// 画在标记**下面**:真实图上点压着棒身。颜色取曲线自己的颜色 —— 它是从图上
+    /// 量出来的东西,不是软件的注释,所以不该用一套独立的强调色把它和曲线割开。
+    /// 唯一的例外是线宽:棒身比折线细(1.2 对 1.7),免得盖过曲线。
+    private func drawErrorBars() {
+        for line in state.lines where line.isVisible && line.hasErrorBars {
+            let view = line.orderedPoints.map { transform.viewPoint(fromImage: $0) }
+            let bars = line.orderedErrorBars
+            let color = NSColor(srgbRed: CGFloat(line.color.r) / 255,
+                                green: CGFloat(line.color.g) / 255,
+                                blue: CGFloat(line.color.b) / 255, alpha: 1)
+            let path = NSBezierPath()
+            let capHalf: CGFloat = 5
+            for (index, point) in view.enumerated() {
+                guard let bar = bars[index], bar.up > 0 || bar.down > 0 else { continue }
+                // 误差存的是像素,而这里的 view 是点乘了缩放之后的坐标 —— 偏移也
+                // 得跟着缩放,否则放大后棒会缩水、缩小时棒会虚长。
+                let scale = transform.scale
+                let top = point.y + CGFloat(bar.up) * scale
+                let bottom = point.y - CGFloat(bar.down) * scale
+                path.move(to: NSPoint(x: point.x, y: top))
+                path.line(to: NSPoint(x: point.x, y: bottom))
+                if bar.up > 0 {
+                    path.move(to: NSPoint(x: point.x - capHalf, y: top))
+                    path.line(to: NSPoint(x: point.x + capHalf, y: top))
+                }
+                if bar.down > 0 {
+                    path.move(to: NSPoint(x: point.x - capHalf, y: bottom))
+                    path.line(to: NSPoint(x: point.x + capHalf, y: bottom))
+                }
+            }
+            guard !path.isEmpty else { continue }
+            path.lineWidth = 1.2
+            path.lineCapStyle = .round
+            color.withAlphaComponent(0.85).setStroke()
+            path.stroke()
+        }
+    }
+
     /// 构建一条曲线的遮膜:三道闸门,加上可选的第四道(网格线去除,B-1)。
     ///
     /// 一处实现,三个调用点(`refreshMasks` / `rebuildMask` / 取色)共用 ——
@@ -1502,6 +1575,9 @@ final class CanvasView: NSView {
         }
 
         drawCalibrationOverlay()
+        // 误差棒在曲线**之前**画:真实图上点压着棒身,反过来会把这一版新加的
+        // 东西画到曲线之上,视觉上抢夺注意力 —— 它是量出来的数据,不是标注。
+        drawErrorBars()
         drawCurves()
         drawEditingOverlay()
         drawSymbolCandidates()

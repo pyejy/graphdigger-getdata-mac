@@ -474,6 +474,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         action: #selector(deleteLine(_:)), keyEquivalent: "")
         opsMenu.addItem(withTitle: "Clear Points on Current Curve",
                         action: #selector(clearPoints(_:)), keyEquivalent: "")
+
+        // ---- 误差棒 (B-2) --------------------------------------------------
+        //
+        // 挨着「清空点」放,因为它也是**对已取的点**做的数据处理:把每个点旁边
+        // 那一根带上下横杠的竖线量出来,存成两个额外的值,导出时多两列。
+        let errorBarItem = NSMenuItem(title: "Extract Error Bars (提取误差棒)",
+                                      action: #selector(extractErrorBars(_:)),
+                                      keyEquivalent: "")
+        errorBarItem.toolTip = "对当前曲线上已经取到的每个点,沿竖线上下找它两端的小横杠,"
+            + "把上下误差量出来(不对称也分开记)。导出时多两列 yErrLow / yErrHigh。"
+        opsMenu.addItem(errorBarItem)
+        errorBarsItem = errorBarItem
+        opsMenu.addItem(withTitle: "Clear Error Bars (清除误差棒)",
+                        action: #selector(clearErrorBars(_:)), keyEquivalent: "")
         opsMenu.addItem(.separator())
         let orderItem = NSMenuItem(title: "Point Order (取点顺序)", action: nil, keyEquivalent: "")
         let orderMenu = NSMenu(title: "Point Order")
@@ -1120,6 +1134,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refreshUI("已删除坐标系 \(ordinal)")
     }
 
+    /// 「提取误差棒」菜单项(B-2),`refreshUI` 负责可用性。
+    private var errorBarsItem: NSMenuItem!
+
+    @objc private func extractErrorBars(_ sender: Any?) {
+        guard canvas.buffer != nil else {
+            presentError("先打开一张图表图片。")
+            return
+        }
+        guard let active = canvas.state.activeLine else { return }
+        guard active.lineColor != nil else {
+            presentError("先给「\(active.name)」取色 —— 认横杠要用曲线颜色的遮膜。")
+            return
+        }
+        guard !active.points.isEmpty else {
+            presentError("「\(active.name)」还没有点。先取点,再提取误差棒。")
+            return
+        }
+        guard let result = canvas.scanErrorBars() else { return }
+        // 报数,不报状态:没找到与找到一半,用户必须能一眼分清。
+        var message = "误差棒:\(result.found)/\(result.offsets.count) 个点找到"
+        if result.halfBars > 0 {
+            message += " · 其中 \(result.halfBars) 个只量到一半(另一端的横杠常被曲线压住)"
+        }
+        if result.found == 0 {
+            message += " —— 这些点旁边没有误差棒,或者棒与曲线不同色(先「取色」对准它)"
+        } else {
+            message += " —— 导出会多出 yErrLow / yErrHigh 两列"
+        }
+        refreshUI(message)
+    }
+
+    @objc private func clearErrorBars(_ sender: Any?) {
+        canvas.clearErrorBars()
+        refreshUI("已清除误差棒(点本身不动)")
+    }
+
     @objc private func toggleGridRemoval(_ sender: Any?) {
         guard canvas.buffer != nil else {
             presentError("先打开一张图表图片,再去网格线。")
@@ -1648,6 +1698,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 去网格线的勾与可用性:没有图就没有遮膜,这一项也就无从谈起。
         gridRemovalItem.state = state.removesGridLines ? .on : .off
         gridRemovalItem.isEnabled = hasImage
+
+        // 提取误差棒要有图、有取过色的曲线、且曲线上有点 —— 三个条件缺一个
+        // 都无事可做,禁用比点了报错更省事。
+        errorBarsItem.isEnabled = hasImage && (state.activeLine?.lineColor != nil)
+            && !(state.activeLine?.points.isEmpty ?? true)
 
         // Last, and deliberately: the title and the edited dot are read off the
         // state this method has just finished rebuilding the other views from, so

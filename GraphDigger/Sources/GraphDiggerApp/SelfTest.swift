@@ -1131,6 +1131,9 @@ enum SelfTest {
         let gridRemoval = gridRemovalCleansTheMask()
         check("去网格线开关真的换了一张遮膜,且来回切都能复原", gridRemoval.passed, gridRemoval.detail)
 
+        let errorBars = errorBarsTravelFromTheChartToTheExport()
+        check("提取误差棒:量出的值存进模型,导出真的多两列", errorBars.passed, errorBars.detail)
+
         print(String(repeating: "─", count: 62))
         if failures == 0 {
             print("全部通过。")
@@ -4880,6 +4883,72 @@ enum SelfTest {
             ? "开:网格墨 0 像素(报出 10 竖 + 10 横)· 关:复原 \(restored) 像素 · 再开:又是 0"
             : "开=\(cleaned) 关=\(restored) 再开=\(cleanedAgain)"
                 + " 报告列=\(outcome?.columns.count ?? -1) 行=\(outcome?.rows.count ?? -1)")
+    }
+
+    /// B-2 的端到端:从图上量出来 → 存进曲线 → 导出多两列。
+    ///
+    /// 三段各自都有单测(算法在 `ErrorBarScannerTests`、导出在 `ErrorBarExportTests`),
+    /// 这里验的是**它们之间接上了**:画布的扫描用的是曲线自己的遮膜、量到的偏移
+    /// 按存储序存对、导出按曲线的标定换算成数值。任何一处错位,单测都不会红。
+    private static func errorBarsTravelFromTheChartToTheExport()
+        -> (passed: Bool, detail: String) {
+        let delegate = AppDelegate()
+        delegate.buildMenu()
+        delegate.buildWindow()
+        guard let canvas = delegate.canvas else { return (false, "画布没建出来") }
+
+        let chart = SyntheticChart.renderErrorBars(count: 6, up: { _ in 30 }, down: { _ in 18 })
+        guard let cg = SampleChartWriter.makeCGImage(from: chart.buffer),
+              let png = NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:])
+        else { return (false, "造不出测试图") }
+
+        var state = ProjectState()
+        let lineID = state.addLine(name: "误差棒", color: chart.lineColor)
+        state.setLineColor(chart.lineColor, for: lineID)
+        state.append(points: chart.points, usingDefaultColor: chart.lineColor)
+        state.installCalibration(chart.calibration)
+        let document = ProjectDocument(
+            header: ProjectHeader(image: ProjectImageInfo(fileName: "bars.png",
+                                                          pixelWidth: chart.buffer.width,
+                                                          pixelHeight: chart.buffer.height),
+                                  state: state),
+            imageData: png)
+        guard canvas.load(project: document) else { return (false, "项目载不进画布") }
+
+        guard let result = canvas.scanErrorBars() else { return (false, "扫描没返回结果") }
+        guard let line = canvas.state.activeLine else { return (false, "找不到活动曲线") }
+        let stored = line.errorBars ?? []
+        let allMeasured = stored.count == chart.points.count
+            && stored.allSatisfy { offset in
+                guard let offset else { return false }
+                return abs(offset.up - 30) <= 1.5 && abs(offset.down - 18) <= 1.5
+            }
+
+        // 导出:CSV 必须多出两列,且数值按这张图自己的标定换算 —— 期望值从夹具的
+        // 轴跨度推出来(不是从导出器的实现里抄)。
+        let unitsPerPixel = (chart.yMaxValue - chart.yMinValue)
+            / Double(chart.axisY0 - chart.axisY1)
+        let expectedHigh = 30.0 * unitsPerPixel
+        let expectedLow = 18.0 * unitsPerPixel
+        let csv = (try? Exporter.text(for: canvas.state.lines,
+                                      calibration: chart.calibration,
+                                      format: .csv)) ?? ""
+        let rows = csv.split(separator: "\n").map(String.init)
+        let headerOK = rows.first?.hasPrefix("x,y,yErrLow,yErrHigh") == true
+        var numbersOK = false
+        if rows.count > 1 {
+            let cells = rows[1].split(separator: ",").map(String.init)
+            if cells.count == 4, let low = Double(cells[2]), let high = Double(cells[3]) {
+                numbersOK = abs(low - expectedLow) < 0.01 && abs(high - expectedHigh) < 0.01
+            }
+        }
+
+        let passed = result.found == 6 && allMeasured && headerOK && numbersOK
+        return (passed, passed
+            ? "6/6 找到,偏移存对(上 30px / 下 18px),"
+                + String(format: "CSV 四列且换算成 %.3f / %.3f", expectedHigh, expectedLow)
+            : "found=\(result.found) 存储=\(stored.count) 表头=\(headerOK) 数值=\(numbersOK)"
+                + " · \(rows.first ?? "")")
     }
 
     /// "Excel-style", as the user put it: every row separated by a rule and every
