@@ -49,7 +49,7 @@ ARCHS=(arm64 x86_64)
 # a bundle that keeps claiming an old number makes the one record that is
 # supposed to identify the build useless. It sat at 0.1.0 across two releases
 # before this line existed, which is how the problem went unnoticed.
-VERSION="0.8.0"
+VERSION="0.8.1"
 
 # The project file type, read out of the source rather than typed again here.
 #
@@ -260,8 +260,57 @@ if [ "$MAKE_DMG" = "1" ]; then
     DMG_PATH="$DIST_DIR/$APP_NAME.dmg"
     echo "==> Creating $DMG_PATH"
     rm -f "$DMG_PATH"
-    hdiutil create -volname "$APP_NAME" -srcfolder "$APP_BUNDLE" \
-        -ov -format UDZO "$DMG_PATH" >/dev/null
+
+    # 安装窗口的背景图:与图标同一个路子 —— 代码画出来,不塞二进制资源。
+    BACKGROUND="$DIST_DIR/dmg-background.png"
+    swift "$REPO_ROOT/scripts/make_dmg_background.swift" "$BACKGROUND" 640 400 >/dev/null
+
+    # 窗口布局(图标位置、图标尺寸 128、背景)存在 .DS_Store 里,得靠 dmgbuild 写。
+    # 解释器可换:DMGBUILD_PYTHON=/path/to/python ./scripts/build_universal.sh --dmg
+    DMGBUILD_PYTHON="${DMGBUILD_PYTHON:-python3}"
+    if "$DMGBUILD_PYTHON" -c "import dmgbuild" >/dev/null 2>&1; then
+        "$DMGBUILD_PYTHON" -m dmgbuild \
+            -s "$REPO_ROOT/scripts/dmg_settings.py" \
+            -D "app=$APP_BUNDLE" \
+            -D "appname=$APP_NAME" \
+            -D "background=$BACKGROUND" \
+            -D "volume_name=$APP_NAME $VERSION" \
+            "$APP_NAME" "$DMG_PATH" >/dev/null
+    else
+        # 退路:没有 dmgbuild 时至少给出「应用程序」软链 —— 拖拽安装能用,
+        # 只是没有背景与窗口布局,且图标是默认的 64pt。**不去 pip install 到用户
+        # 的环境里**:依赖是用户的选择,不是我们替他做的决定。
+        echo "    ⚠️  没找到 dmgbuild,退回朴素镜像(有「应用程序」软链,无背景/窗口布局)"
+        echo "       想要完整安装窗口:  $DMGBUILD_PYTHON -m pip install dmgbuild"
+        STAGE="$DIST_DIR/dmg-stage"
+        rm -rf "$STAGE"
+        mkdir -p "$STAGE"
+        cp -R "$APP_BUNDLE" "$STAGE/"
+        ln -s /Applications "$STAGE/Applications"
+        hdiutil create -volname "$APP_NAME" -srcfolder "$STAGE" \
+            -ov -format UDZO "$DMG_PATH" >/dev/null
+        rm -rf "$STAGE"
+    fi
+    rm -f "$BACKGROUND"
+
+    # **断言,而不是指望**:镜像里必须真的有一条指向 /Applications 的软链 ——
+    # 它就是"拖动安装"能成立的全部原因,而它一旦丢了,镜像照样打得出来、照样能挂载,
+    # 用户却只能手动去拷。所以这里挂起来查一遍,缺了就让打包失败。
+    VERIFY_MOUNT="$(mktemp -d)"
+    if hdiutil attach -nobrowse -noautoopen -mountpoint "$VERIFY_MOUNT" \
+        "$DMG_PATH" >/dev/null 2>&1; then
+        if [ ! -L "$VERIFY_MOUNT/Applications" ]; then
+            echo "    ❌ 镜像里没有「应用程序」软链 —— 拖拽安装不成立" >&2
+            hdiutil detach "$VERIFY_MOUNT" >/dev/null 2>&1
+            rmdir "$VERIFY_MOUNT" 2>/dev/null
+            exit 1
+        fi
+        if [ ! -f "$VERIFY_MOUNT/.DS_Store" ]; then
+            echo "    ⚠️  镜像里没有 .DS_Store —— 窗口会用 Finder 默认布局(图标偏小)" >&2
+        fi
+        hdiutil detach "$VERIFY_MOUNT" >/dev/null 2>&1
+    fi
+    rmdir "$VERIFY_MOUNT" 2>/dev/null
     echo "    dmg size    : $(du -sh "$DMG_PATH" | cut -f1)"
 fi
 
