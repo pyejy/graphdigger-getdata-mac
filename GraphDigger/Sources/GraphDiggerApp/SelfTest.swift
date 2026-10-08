@@ -1124,6 +1124,9 @@ enum SelfTest {
         check("工具栏与信息条背景跟随深浅外观(不再固化在启动时的外观)",
               chrome.passed, chrome.detail)
 
+        let about = aboutPanelCarriesAuthorAndCodes()
+        check("关于面板:作者名与版本在面板上,两枚收款码能从包里取到", about.passed, about.detail)
+
         let chineseMenus = menusAreChineseOnly()
         check("菜单纯中文(用户要求);格式缩写与应用名除外", chineseMenus.passed,
               chineseMenus.detail)
@@ -4954,6 +4957,34 @@ enum SelfTest {
                 + String(format: "CSV 四列且换算成 %.3f / %.3f", expectedHigh, expectedLow)
             : "found=\(result.found) 存储=\(stored.count) 表头=\(headerOK) 数值=\(numbersOK)"
                 + " · \(rows.first ?? "")")
+    }
+
+    /// 「关于」面板:作者名、版本号必须**出现在面板的文字里**(不是只存在于常量),
+    /// 收款码必须能从包里取到且是正方形。
+    ///
+    /// 裸二进制(开发期 `./.build/debug/GraphDigger`)里没有资源,此时要验的是
+    /// **它落到了占位文案**而不是留下一块空白 —— 空白会被当成坏了。真正的资源
+    /// 检查发生在发布验证里:自检跑的是挂载后 .app 内的二进制。
+    private static func aboutPanelCarriesAuthorAndCodes() -> (passed: Bool, detail: String) {
+        let content = AboutWindow.makeContentView()
+        content.layoutSubtreeIfNeeded()
+        let texts = descendants(of: content).compactMap { ($0 as? NSTextField)?.stringValue }
+        let hasAuthor = texts.contains { $0.contains(AboutWindow.authorName) }
+        let hasVersion = texts.contains { $0.contains("版本") || $0.contains("开发版") }
+        let codes = ["wechat-qr", "alipay-qr"].map { AboutWindow.paymentImage(named: $0) }
+        let inAppBundle = Bundle.main.bundlePath.hasSuffix(".app")
+
+        if !inAppBundle {
+            let placeholder = texts.contains { $0.contains("打包后可见") }
+            return (hasAuthor && hasVersion && codes.allSatisfy { $0 == nil } && placeholder,
+                    "开发版(不在 .app 内):作者「\(AboutWindow.authorName)」与版本在,"
+                        + "收款码显示占位文案")
+        }
+        let sizes = codes.compactMap { $0?.size }
+        let square = sizes.count == 2 && sizes.allSatisfy { abs($0.width - $0.height) < 1 }
+        return (hasAuthor && hasVersion && square,
+                square ? "面板上有作者与版本;两枚收款码 \(Int(sizes[0].width))×\(Int(sizes[0].height))"
+                       : "取到 \(sizes.count) 枚收款码,square=\(square)")
     }
 
     /// 菜单必须纯中文 —— 用户要求「不要英文」。改一遍不算完成,断言才算:

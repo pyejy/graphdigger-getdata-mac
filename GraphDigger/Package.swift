@@ -32,9 +32,18 @@ let package = Package(
         .target(name: "GDCore"),
 
         // AppKit shell. Grows into the full UI per the architecture doc.
+        //
+        // `Resources/` holds the two payment QR images shown in the About panel.
+        // They are **excluded from SwiftPM on purpose**, and the build script
+        // copies them into the .app's `Contents/Resources` instead. The
+        // alternative — SwiftPM's own resource bundle — needs `Bundle.module`,
+        // which **traps at launch** when the bundle is not beside the executable,
+        // and this app is packaged by hand (binary + Info.plist + icns). A
+        // missing image should show a placeholder, not kill the app.
         .executableTarget(
             name: "GraphDiggerApp",
-            dependencies: ["GDCore"]
+            dependencies: ["GDCore"],
+            exclude: ["Resources"]
         ),
 
         .testTarget(

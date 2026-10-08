@@ -312,9 +312,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let appItem = NSMenuItem()
         main.addItem(appItem)
         let appMenu = NSMenu()
+        // 自己的关于面板:系统那条 `orderFrontStandardAboutPanel` 只留了一行
+        // Credits 给附加内容,两枚收款码要在那里排好版是跟 AppKit 讨价还价 ——
+        // 而且系统面板没法被自检渲染出来验。见 `AboutWindow`。
         appMenu.addItem(withTitle: "关于 GraphDigger",
-                        action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
-                        keyEquivalent: "")
+                        action: #selector(showAbout(_:)), keyEquivalent: "")
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "退出 GraphDigger",
                         action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
@@ -1169,6 +1171,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func clearErrorBars(_ sender: Any?) {
         canvas.clearErrorBars()
         refreshUI("已清除误差棒(点本身不动)")
+    }
+
+    @objc private func showAbout(_ sender: Any?) {
+        AboutWindow.show()
     }
 
     @objc private func toggleGridRemoval(_ sender: Any?) {

@@ -49,7 +49,7 @@ ARCHS=(arm64 x86_64)
 # a bundle that keeps claiming an old number makes the one record that is
 # supposed to identify the build useless. It sat at 0.1.0 across two releases
 # before this line existed, which is how the problem went unnoticed.
-VERSION="0.7.3"
+VERSION="0.8.0"
 
 # The project file type, read out of the source rather than typed again here.
 #
@@ -145,6 +145,15 @@ ICONSET="$REPO_ROOT/.build/AppIcon.iconset"
 rm -rf "$ICONSET"
 swift "$REPO_ROOT/scripts/make_icon.swift" "$ICONSET" >/dev/null
 iconutil -c icns "$ICONSET" -o "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
+
+# 赞助收款码(关于面板用)。它们是**图片**,画不出来,只能带在包里 ——
+# 与图标相反:图标有 make_icon.swift 这个可复现的来源,而收款码的来源是
+# 用户自己的微信/支付宝截图,所以存进版本库的是裁好的那份。
+echo "==> Copying resources"
+RESOURCES="$REPO_ROOT/Sources/GraphDiggerApp/Resources"
+if [ -d "$RESOURCES" ]; then
+    cp "$RESOURCES"/*.png "$APP_BUNDLE/Contents/Resources/"
+fi
 
 cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
