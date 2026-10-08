@@ -312,11 +312,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let appItem = NSMenuItem()
         main.addItem(appItem)
         let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "About GraphDigger",
+        appMenu.addItem(withTitle: "关于 GraphDigger",
                         action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
                         keyEquivalent: "")
         appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "Quit GraphDigger",
+        appMenu.addItem(withTitle: "退出 GraphDigger",
                         action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
 
@@ -324,9 +324,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // There was no Edit menu until undo arrived, and an undo with no ⌘Z is an
         // undo nobody finds. It sits where every other Mac app puts it, between
         // the application menu and File.
-        let editItem = NSMenuItem()
+        let editItem = NSMenuItem(title: "编辑", action: nil, keyEquivalent: "")
         main.addItem(editItem)
-        let editMenu = NSMenu(title: "Edit")
+        let editMenu = NSMenu(title: "编辑")
         undoMenuItem = NSMenuItem(title: "撤销", action: #selector(undoAction(_:)),
                                   keyEquivalent: "z")
         editMenu.addItem(undoMenuItem)
@@ -337,9 +337,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         editItem.submenu = editMenu
 
         // ---- File -------------------------------------------------------
-        let fileItem = NSMenuItem()
+        let fileItem = NSMenuItem(title: "文件", action: nil, keyEquivalent: "")
         main.addItem(fileItem)
-        let fileMenu = NSMenu(title: "File")
+        let fileMenu = NSMenu(title: "文件")
         // One 「打开…」 for both kinds of file. Two entries would make the user
         // work out which sort of document they are holding before they can ask
         // for it, when the file itself already says — and ⌘O keeps meaning what
@@ -353,8 +353,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         fileMenu.addItem(saveAsItem)
         fileMenu.addItem(.separator())
 
-        let exportItem = NSMenuItem(title: "Export Data", action: nil, keyEquivalent: "")
-        let exportMenu = NSMenu(title: "Export Data")
+        let exportItem = NSMenuItem(title: "导出数据", action: nil, keyEquivalent: "")
+        let exportMenu = NSMenu(title: "导出数据")
         for format in ExportFormat.allCases {
             let item = NSMenuItem(title: format.displayName,
                                   action: #selector(exportData(_:)), keyEquivalent: "")
@@ -368,9 +368,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // rather than a modifier on the first: five curves out of a paper and one
         // of them wanted is the ordinary case, and the alternative was exporting
         // all five and deleting four columns by hand.
-        let exportActiveItem = NSMenuItem(title: "Export Current Curve (只导出当前曲线)",
+        let exportActiveItem = NSMenuItem(title: "只导出当前曲线",
                                           action: nil, keyEquivalent: "")
-        let exportActiveMenu = NSMenu(title: "Export Current Curve")
+        let exportActiveMenu = NSMenu(title: "只导出当前曲线")
         for format in ExportFormat.allCases {
             let item = NSMenuItem(title: format.displayName,
                                   action: #selector(exportCurrentCurve(_:)), keyEquivalent: "")
@@ -384,9 +384,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // what it changes, and a submenu with a tick rather than a pair of
         // commands because it is a setting the user has to be able to *read back*
         // before choosing a format, not after.
-        let decimalItem = NSMenuItem(title: "导出小数分隔符 (Decimal Separator)",
+        let decimalItem = NSMenuItem(title: "导出小数分隔符",
                                      action: nil, keyEquivalent: "")
-        let decimalMenu = NSMenu(title: "Decimal Separator")
+        let decimalMenu = NSMenu(title: "小数分隔符")
         for separator in DecimalSeparator.allCases {
             let item = NSMenuItem(title: separator.displayName,
                                   action: #selector(chooseDecimalSeparator(_:)),
@@ -399,21 +399,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         decimalItem.submenu = decimalMenu
         fileMenu.addItem(decimalItem)
 
-        fileMenu.addItem(withTitle: "Copy Data to Clipboard (复制全部曲线)",
+        fileMenu.addItem(withTitle: "复制全部曲线",
                          action: #selector(copyData(_:)), keyEquivalent: "c")
-        let copyActive = NSMenuItem(title: "Copy Current Curve (复制当前曲线)",
+        let copyActive = NSMenuItem(title: "复制当前曲线",
                                     action: #selector(copyCurrentCurve(_:)), keyEquivalent: "c")
         copyActive.keyEquivalentModifierMask = [.command, .option]
         fileMenu.addItem(copyActive)
         fileMenu.addItem(.separator())
-        fileMenu.addItem(withTitle: "Close Window",
+        fileMenu.addItem(withTitle: "关闭窗口",
                          action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         fileItem.submenu = fileMenu
 
         // ---- Operations --------------------------------------------------
-        let opsItem = NSMenuItem()
+        let opsItem = NSMenuItem(title: "操作", action: nil, keyEquivalent: "")
         main.addItem(opsItem)
-        let opsMenu = NSMenu(title: "Operations")
+        let opsMenu = NSMenu(title: "操作")
 
         func addTool(_ title: String, _ raw: String, _ key: String,
                      _ modifiers: NSEvent.ModifierFlags = [.command]) {
@@ -425,7 +425,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // 「浏览」两个字读起来像"浏览文件"——用户点了等一个文件选择窗,而它其实
         // 是切换到缩放平移工具。把真实行为写进菜单项的名字里。
-        addTool("Browse Tool (浏览:缩放平移)", "browse", "1")
+        addTool("浏览工具(缩放平移)", "browse", "1")
         opsMenu.addItem(.separator())
         // The plain letter goes to the everyday action; the rarer or more
         // destructive one keeps its letter a modifier over. That is the rule
@@ -438,59 +438,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // a stray ⌘S meant for 保存 would offer to throw it away; if it is not,
         // the next four clicks on the chart would silently be eaten as
         // calibration anchors.
-        addTool("Set the Scale (标定坐标系)", "setScale", "s", [.command, .option])
-        addTool("Edit Calibration Values (修改标定数值)…", "editCalibration", "")
+        addTool("标定坐标系", "setScale", "s", [.command, .option])
+        addTool("修改标定数值…", "editCalibration", "")
         // ⌥⌘R for the same reason, and it repairs a collision that was already
         // here: 清除标定并重来 and 重新选点 were both written with ⌘R. AppKit
         // silently fires whichever comes first and never mentions the loser, so
         // 重新选点 has been unreachable from the keyboard all along — and it is
         // the one of the two that is a *tool*, sitting in the toolbar beside
         // 橡皮擦. It takes the plain key; the destructive one moves over.
-        addTool("Recalibrate (清除标定并重来)", "recalibrate", "r", [.command, .option])
+        addTool("清除标定并重来", "recalibrate", "r", [.command, .option])
         opsMenu.addItem(.separator())
-        addTool("Pick Curve Color (取曲线颜色)", "pickLineColor", "l")
-        addTool("Pick Background Color (取背景颜色)", "pickBackgroundColor", "k")
-        addTool("Color Tolerance…", "tolerance", "")
+        addTool("取曲线颜色", "pickLineColor", "l")
+        addTool("取背景颜色", "pickBackgroundColor", "k")
+        addTool("颜色容差…", "tolerance", "")
         opsMenu.addItem(.separator())
-        addTool("Digitize Area (区域取点)", "gridDigitize", "d")
-        addTool("Auto Trace Line (自动跟踪)", "traceDigitize", "t")
+        addTool("区域取点", "gridDigitize", "d")
+        addTool("自动跟踪", "traceDigitize", "t")
         // ⌘M for Match, next to the two tools it is an alternative to. It would be
         // Minimize on a Mac with a Window menu; this app builds none, so the key
         // was free and the mnemonic beats the letter being unclaimed.
-        addTool("Match Symbols (符号匹配)", "symbolMatch", "m")
-        addTool("Point Capture (手工取点)", "capture", "p")
-        addTool("Eraser (橡皮擦)", "eraser", "e")
+        addTool("符号匹配", "symbolMatch", "m")
+        addTool("手工取点", "capture", "p")
+        addTool("橡皮擦", "eraser", "e")
         // ⇧⌘E, one modifier over the eraser's ⌘E: this is the same job at a finer
         // grain — 橡皮擦 acts on everything inside a ring, 点编辑 on the one marker
         // under the pointer — so the letter belongs to the pair and the modifier
         // says which of the two. It is also the only repair tool here that can
         // *add* a point, which the eraser and 重新选点 both cannot.
-        addTool("Edit Point (点编辑)", "editPoint", "e", [.command, .shift])
-        addTool("Re-digitize (重新选点)", "redigitize", "r")
+        addTool("点编辑", "editPoint", "e", [.command, .shift])
+        addTool("重新选点", "redigitize", "r")
         opsMenu.addItem(.separator())
-        opsMenu.addItem(withTitle: "Add Curve (新增曲线)",
+        opsMenu.addItem(withTitle: "新增曲线",
                         action: #selector(addLine(_:)), keyEquivalent: "n")
-        opsMenu.addItem(withTitle: "Delete Current Curve (删除当前曲线)",
+        opsMenu.addItem(withTitle: "删除当前曲线",
                         action: #selector(deleteLine(_:)), keyEquivalent: "")
-        opsMenu.addItem(withTitle: "Clear Points on Current Curve",
+        opsMenu.addItem(withTitle: "清空当前曲线的点",
                         action: #selector(clearPoints(_:)), keyEquivalent: "")
 
         // ---- 误差棒 (B-2) --------------------------------------------------
         //
         // 挨着「清空点」放,因为它也是**对已取的点**做的数据处理:把每个点旁边
         // 那一根带上下横杠的竖线量出来,存成两个额外的值,导出时多两列。
-        let errorBarItem = NSMenuItem(title: "Extract Error Bars (提取误差棒)",
+        let errorBarItem = NSMenuItem(title: "提取误差棒",
                                       action: #selector(extractErrorBars(_:)),
                                       keyEquivalent: "")
         errorBarItem.toolTip = "对当前曲线上已经取到的每个点,沿竖线上下找它两端的小横杠,"
             + "把上下误差量出来(不对称也分开记)。导出时多两列 yErrLow / yErrHigh。"
         opsMenu.addItem(errorBarItem)
         errorBarsItem = errorBarItem
-        opsMenu.addItem(withTitle: "Clear Error Bars (清除误差棒)",
+        opsMenu.addItem(withTitle: "清除误差棒",
                         action: #selector(clearErrorBars(_:)), keyEquivalent: "")
         opsMenu.addItem(.separator())
-        let orderItem = NSMenuItem(title: "Point Order (取点顺序)", action: nil, keyEquivalent: "")
-        let orderMenu = NSMenu(title: "Point Order")
+        let orderItem = NSMenuItem(title: "取点顺序", action: nil, keyEquivalent: "")
+        let orderMenu = NSMenu(title: "点的排列顺序")
         for order in PointOrder.allCases {
             let item = NSMenuItem(title: order.displayName,
                                   action: #selector(setPointOrder(_:)), keyEquivalent: "")
@@ -503,8 +503,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 点重排 sits with the tools rather than among the order menu's entries:
         // the four order modes are choices about the points, while this is a
         // gesture that produces a fifth order nothing else can name.
-        addTool("Reorder Points by Sweep (点重排)", "reorder", "b")
-        opsMenu.addItem(withTitle: "Clear Reorder (清除重排)",
+        addTool("点重排", "reorder", "b")
+        opsMenu.addItem(withTitle: "清除重排",
                         action: #selector(clearReorder(_:)), keyEquivalent: "")
         opsMenu.addItem(.separator())
         // The sampling spacings are set by the knob in the info bar, which is
@@ -513,9 +513,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // command — but they open a field rather than being the only way in,
         // which is what the user complained about: 网格间距 was reachable only
         // from here and undiscoverable, and the trace density not at all.
-        opsMenu.addItem(withTitle: "网格间距 (Grid Spacing)…",
+        opsMenu.addItem(withTitle: "网格间距…",
                         action: #selector(setGridSpacing(_:)), keyEquivalent: "")
-        opsMenu.addItem(withTitle: "取点密度 (Trace Density)…",
+        opsMenu.addItem(withTitle: "取点密度…",
                         action: #selector(setTraceSpacing(_:)), keyEquivalent: "")
 
         // The grid's two shape options sit beside its spacing, because all three
@@ -524,8 +524,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // commands because it is a mode the user needs to *read back* — 「现在是
         // 哪种网格」 has no other answer on screen, and the strip's readout has 58
         // points of width, which is not enough for the word.
-        let gridItem = NSMenuItem(title: "网格方向 (Grid Axis)", action: nil, keyEquivalent: "")
-        let gridMenu = NSMenu(title: "Grid Axis")
+        let gridItem = NSMenuItem(title: "网格方向", action: nil, keyEquivalent: "")
+        let gridMenu = NSMenu(title: "网格方向")
         for axis in GridAxis.allCases {
             let item = NSMenuItem(title: axis.displayName,
                                   action: #selector(setGridAxis(_:)), keyEquivalent: "")
@@ -536,9 +536,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         gridItem.submenu = gridMenu
         opsMenu.addItem(gridItem)
-        opsMenu.addItem(withTitle: "网格对齐到坐标轴起点 (Align Grid to Axis Origin)",
+        opsMenu.addItem(withTitle: "网格对齐到坐标轴起点",
                         action: #selector(alignGridToAxisOrigin(_:)), keyEquivalent: "")
-        opsMenu.addItem(withTitle: "网格偏移 (Grid Phase)…",
+        opsMenu.addItem(withTitle: "网格偏移…",
                         action: #selector(setGridPhase(_:)), keyEquivalent: "")
 
         // ---- 去除图上网格线 (B-1) ------------------------------------------
@@ -548,7 +548,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 网格线 —— 扫描件与打印图最常见的干扰源,Engauge 的教程把"没先去网格"
         // 列为"整个画面被选中"的第一大原因。名字里写明「图上」就是为了这条分界。
         opsMenu.addItem(.separator())
-        let removeGrid = NSMenuItem(title: "去除图上网格线 (Remove Grid Lines on Image)",
+        let removeGrid = NSMenuItem(title: "去除图上网格线",
                                     action: #selector(toggleGridRemoval(_:)),
                                     keyEquivalent: "")
         removeGrid.toolTip = "按几何特征(长、直、细、等距)把图上画着的网格线从取点用的遮膜里去掉了。"
@@ -568,26 +568,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // shortcut is the wrong affordance for a list whose length is not known
         // until the project is open.
         opsMenu.addItem(.separator())
-        let systemsItem = NSMenuItem(title: "坐标系 (Coordinate System)",
+        let systemsItem = NSMenuItem(title: "坐标系",
                                      action: nil, keyEquivalent: "")
-        let systemsMenu = NSMenu(title: "Coordinate System")
-        systemsMenu.addItem(withTitle: "新增坐标系 (New Coordinate System)",
+        let systemsMenu = NSMenu(title: "坐标系")
+        systemsMenu.addItem(withTitle: "新增坐标系",
                             action: #selector(addCoordinateSystem(_:)), keyEquivalent: "")
-        systemsMenu.addItem(withTitle: "删除当前坐标系 (Delete Current)",
+        systemsMenu.addItem(withTitle: "删除当前坐标系",
                             action: #selector(removeCurrentCoordinateSystem(_:)),
                             keyEquivalent: "")
 
         systemsMenu.addItem(.separator())
-        let listItem = NSMenuItem(title: "当前坐标系 (Active)", action: nil, keyEquivalent: "")
-        let listMenu = NSMenu(title: "Active Coordinate System")
+        let listItem = NSMenuItem(title: "当前坐标系", action: nil, keyEquivalent: "")
+        let listMenu = NSMenu(title: "当前坐标系")
         listItem.submenu = listMenu
         systemsMenu.addItem(listItem)
         systemListMenu = listMenu
 
         systemsMenu.addItem(.separator())
-        let assignItem = NSMenuItem(title: "把当前曲线归到 (Assign Curve To)",
+        let assignItem = NSMenuItem(title: "把当前曲线归到",
                                     action: nil, keyEquivalent: "")
-        let assignMenu = NSMenu(title: "Assign Curve To")
+        let assignMenu = NSMenu(title: "把当前曲线归到")
         assignItem.submenu = assignMenu
         systemsMenu.addItem(assignItem)
         assignToSystemMenu = assignMenu
@@ -597,22 +597,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         opsItem.submenu = opsMenu
 
         // ---- View --------------------------------------------------------
-        let viewItem = NSMenuItem()
+        let viewItem = NSMenuItem(title: "视图", action: nil, keyEquivalent: "")
         main.addItem(viewItem)
-        let viewMenu = NSMenu(title: "View")
-        viewMenu.addItem(withTitle: "Zoom In", action: #selector(zoomIn(_:)), keyEquivalent: "+")
-        viewMenu.addItem(withTitle: "Zoom Out", action: #selector(zoomOut(_:)), keyEquivalent: "-")
-        viewMenu.addItem(withTitle: "Fit to Window", action: #selector(zoomToFit(_:)), keyEquivalent: "9")
+        let viewMenu = NSMenu(title: "视图")
+        viewMenu.addItem(withTitle: "放大", action: #selector(zoomIn(_:)), keyEquivalent: "+")
+        viewMenu.addItem(withTitle: "缩小", action: #selector(zoomOut(_:)), keyEquivalent: "-")
+        viewMenu.addItem(withTitle: "适配窗口", action: #selector(zoomToFit(_:)), keyEquivalent: "9")
         viewMenu.addItem(.separator())
         // The two views that exist to *check* the work rather than to do it. Both
         // are looking aids, so both live here and neither is in the undo history.
-        let showImage = NSMenuItem(title: "Show Image (显示原图)",
+        let showImage = NSMenuItem(title: "显示原图",
                                    action: #selector(toggleShowsImage(_:)), keyEquivalent: "i")
         showImage.keyEquivalentModifierMask = [.command, .shift]
         viewMenu.addItem(showImage)
         showsImageMenuItem = showImage
 
-        let dataView = NSMenuItem(title: "Data View (数据视图)",
+        let dataView = NSMenuItem(title: "数据视图",
                                   action: #selector(showDataPlot(_:)), keyEquivalent: "d")
         dataView.keyEquivalentModifierMask = [.command, .shift]
         viewMenu.addItem(dataView)

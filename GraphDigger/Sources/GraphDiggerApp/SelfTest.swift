@@ -1124,6 +1124,10 @@ enum SelfTest {
         check("工具栏与信息条背景跟随深浅外观(不再固化在启动时的外观)",
               chrome.passed, chrome.detail)
 
+        let chineseMenus = menusAreChineseOnly()
+        check("菜单纯中文(用户要求);格式缩写与应用名除外", chineseMenus.passed,
+              chineseMenus.detail)
+
         let listFit = curveListFitsWithoutHorizontalScrolling()
         check("曲线列表与点表不横向溢出(点数列不需要横向滚动才看得到)",
               listFit.passed, listFit.detail)
@@ -2886,7 +2890,7 @@ enum SelfTest {
         var separatorItems: [NSMenuItem] = []
         func find(_ menu: NSMenu) {
             for item in menu.items {
-                if item.submenu?.title == "Decimal Separator" {
+                if item.submenu?.title == "小数分隔符" {
                     separatorItems = item.submenu?.items ?? []
                     return
                 }
@@ -3011,7 +3015,7 @@ enum SelfTest {
         var systemItems: [NSMenuItem] = []
         func find(_ menu: NSMenu) {
             for item in menu.items {
-                if item.submenu?.title == "Active Coordinate System" {
+                if item.submenu?.title == "当前坐标系" {
                     systemItems = item.submenu?.items ?? []
                     return
                 }
@@ -3970,22 +3974,22 @@ enum SelfTest {
             ("⌘O", "打开…"),
             ("⌘S", "保存项目"),
             ("⇧⌘S", "项目另存为…"),
-            ("⌘C", "Copy Data to Clipboard (复制全部曲线)"),
-            ("⌥⌘C", "Copy Current Curve (复制当前曲线)"),
-            ("⇧⌘I", "Show Image (显示原图)"),
-            ("⇧⌘D", "Data View (数据视图)"),
-            ("⌘W", "Close Window"),
+            ("⌘C", "复制全部曲线"),
+            ("⌥⌘C", "复制当前曲线"),
+            ("⇧⌘I", "显示原图"),
+            ("⇧⌘D", "数据视图"),
+            ("⌘W", "关闭窗口"),
             ("⌘Z", "撤销"),
             ("⇧⌘Z", "重做"),
-            ("⌥⌘S", "Set the Scale (标定坐标系)"),
-            ("⌥⌘R", "Recalibrate (清除标定并重来)"),
-            ("⌘R", "Re-digitize (重新选点)"),
-            ("⌘B", "Reorder Points by Sweep (点重排)"),
-            ("⌘E", "Eraser (橡皮擦)"),
-            ("⌘M", "Match Symbols (符号匹配)"),
-            ("⇧⌘E", "Edit Point (点编辑)"),
-            ("⌘D", "Digitize Area (区域取点)"),
-            ("⌘1", "Browse Tool (浏览:缩放平移)"),
+            ("⌥⌘S", "标定坐标系"),
+            ("⌥⌘R", "清除标定并重来"),
+            ("⌘R", "重新选点"),
+            ("⌘B", "点重排"),
+            ("⌘E", "橡皮擦"),
+            ("⌘M", "符号匹配"),
+            ("⇧⌘E", "点编辑"),
+            ("⌘D", "区域取点"),
+            ("⌘1", "浏览工具(缩放平移)"),
         ]
         for entry in expected {
             let owner = owners[entry.shortcut]?.first
@@ -4008,8 +4012,8 @@ enum SelfTest {
             }
             return []
         }
-        let allCurveItems = exportItems("Export Data")
-        let activeCurveItems = exportItems("Export Current Curve")
+        let allCurveItems = exportItems("导出数据")
+        let activeCurveItems = exportItems("只导出当前曲线")
         if allCurveItems.isEmpty || activeCurveItems.isEmpty {
             problems.append("导出菜单没建出来")
         }
@@ -4950,6 +4954,61 @@ enum SelfTest {
                 + String(format: "CSV 四列且换算成 %.3f / %.3f", expectedHigh, expectedLow)
             : "found=\(result.found) 存储=\(stored.count) 表头=\(headerOK) 数值=\(numbersOK)"
                 + " · \(rows.first ?? "")")
+    }
+
+    /// 菜单必须纯中文 —— 用户要求「不要英文」。改一遍不算完成,断言才算:
+    /// 下次有人加一条 "Open Recent",这里会红,而不是等用户再来报一次。
+    ///
+    /// 允许三种"非中文",都是**故意**的:格式缩写(CSV/TSV/XML/DXF/EPS/XLSX/CAD)、
+    /// 坐标轴变量 X/Y(单字母,不进统计),以及应用名 GraphDigger 本身。
+    private static func menusAreChineseOnly() -> (passed: Bool, detail: String) {
+        let allowed: Set<String> = ["CSV", "TSV", "TXT", "XML", "DXF", "EPS", "XLSX",
+                                    "CAD", "GraphDigger"]
+        var offences: [String] = []
+        var inspected = 0
+
+        func latinWords(_ text: String) -> [String] {
+            var words: [String] = []
+            var current = ""
+            for character in text {
+                if character.isASCII, character.isLetter {
+                    current.append(character)
+                } else {
+                    if current.count >= 2 { words.append(current) }
+                    current = ""
+                }
+            }
+            if current.count >= 2 { words.append(current) }
+            return words
+        }
+
+        func inspect(_ menu: NSMenu, isMenuBar: Bool) {
+            for item in menu.items {
+                if !item.isSeparatorItem, item.title != "NSMenuItem" {
+                    // 菜单栏最左那个是应用菜单,标题由 AppKit 代管,不算内容。
+                    if !(isMenuBar && menu.items.first === item) {
+                        inspected += 1
+                        for word in latinWords(item.title) where !allowed.contains(word) {
+                            offences.append("「\(item.title)」里的 \(word)")
+                        }
+                    }
+                }
+                if let sub = item.submenu { inspect(sub, isMenuBar: false) }
+            }
+        }
+        for item in NSApp.mainMenu?.items ?? [] {
+            if let sub = item.submenu { inspect(sub, isMenuBar: false) }
+            let title = item.title
+            if title != "NSMenuItem", !title.isEmpty {
+                inspected += 1
+                for word in latinWords(title) where !allowed.contains(word) {
+                    offences.append("「\(title)」里的 \(word)")
+                }
+            }
+        }
+        return (offences.isEmpty,
+                offences.isEmpty ? "查了 \(inspected) 条,全是中文"
+                                 : offences.joined(separator: " · "))
     }
 
     /// "Excel-style", as the user put it: every row separated by a rule and every

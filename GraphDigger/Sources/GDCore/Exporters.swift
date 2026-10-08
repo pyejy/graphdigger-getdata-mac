@@ -29,13 +29,13 @@ public enum ExportFormat: String, CaseIterable, Sendable {
 
     public var displayName: String {
         switch self {
-        case .csv: return "CSV (逗号分隔)"
-        case .tsv: return "TSV (制表符,可直接粘贴到 Excel)"
-        case .txt: return "TXT (空格分隔)"
-        case .xml: return "XML"
-        case .dxf: return "DXF (AutoCAD)"
-        case .eps: return "EPS (PostScript)"
-        case .xlsx: return "XLSX (Excel 工作簿,每线一个表)"
+        case .csv: return "CSV 逗号分隔"
+        case .tsv: return "TSV 制表符分隔(可直接粘进表格)"
+        case .txt: return "TXT 空格分隔"
+        case .xml: return "XML 标记文本"
+        case .dxf: return "DXF CAD 交换格式"
+        case .eps: return "EPS 打印矢量图"
+        case .xlsx: return "XLSX 工作簿(每线一个表)"
         }
     }
 }
